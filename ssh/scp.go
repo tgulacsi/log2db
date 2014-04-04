@@ -17,7 +17,7 @@ limitations under the License.
 // From https://gist.github.com/jedy/3357393
 // https://blogs.oracle.com/janp/entry/how_the_scp_protocol_works
 
-package main
+package ssh
 
 import (
 	"crypto"

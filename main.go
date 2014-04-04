@@ -32,10 +32,13 @@ var (
 	flagLogdir   = flag.String("d", "kobed/bruno/data/mai/log", "remote log directory")
 	flagLogfile  = flag.String("logfile", "server.log", "main log file")
 	flagParseLog = flag.String("parselog", "", "(TEST) parse given file")
+	flagDebug    = flag.Bool("debug", false, "debug prints")
 )
 
 func main() {
 	flag.Parse()
+
+	parsers.Debug = *flagDebug
 
 	if *flagParseLog != "" {
 		dest := make(chan parsers.Record, 8)
@@ -55,7 +58,7 @@ func main() {
 		defer fh.Close()
 		go func() {
 			for rec := range dest {
-				log.Printf("RECORD %s", rec)
+				log.Printf("RECORD %+v", rec)
 			}
 		}()
 		if err = parsers.ParseServerLog(dest, fh); err != nil {
@@ -63,10 +66,10 @@ func main() {
 		}
 	} else {
 
-		User := "kobe"
-		Host := "p520"
+		user := "kobe"
+		host := "p520"
 
-		c, err := ssh.NewClient(User, Host, os.ExpandEnv(*flagIdentity))
+		c, err := ssh.NewClient(user, host, os.ExpandEnv(*flagIdentity))
 		if err != nil {
 			log.Fatalf("cannot create client: %v", err)
 		}
