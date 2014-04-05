@@ -38,11 +38,13 @@ import (
 )
 
 var (
-	flagIdentity = flag.String("i", "$HOME/.ssh/id_rsa", "ssh identity file")
-	flagLogdir   = flag.String("d", "kobed/bruno/data/mai/log", "remote log directory")
-	flagLogfile  = flag.String("logfile", "server.log", "main log file")
-	flagDebug    = flag.Bool("debug", false, "debug prints")
-	flagDestDB   = flag.String("to", "ql://xx.qdb", "destination DB URL")
+	flagIdentity   = flag.String("i", "$HOME/.ssh/id_rsa", "ssh identity file")
+	flagLogdir     = flag.String("d", "kobed/bruno/data/mai/log", "remote log directory")
+	flagLogfile    = flag.String("logfile", "server.log", "main log file")
+	flagDebug      = flag.Bool("debug", false, "debug prints")
+	flagVerbose    = flag.Bool("verbose", false, "print input records")
+	flagDestDB     = flag.String("to", "ql://xx.qdb", "destination DB URL")
+	flagFilePrefix = flag.String("prefix", "", "filename's prefix - defaults to the app, if not given")
 )
 
 func main() {
@@ -59,6 +61,10 @@ func main() {
 	}
 	appName := flag.Arg(0)
 	logDir := flag.Arg(1)
+	prefix := *flagFilePrefix
+	if prefix == "" {
+		prefix = appName
+	}
 
 	var err error
 	var (
@@ -87,7 +93,9 @@ func main() {
 		defer wg.Done()
 		go func() {
 			for rec := range records {
-				log.Printf("RECORD %+v", rec)
+				if *flagVerbose {
+					log.Printf("RECORD %+v", rec)
+				}
 			}
 		}()
 	} else {
@@ -118,10 +126,14 @@ func main() {
 			for rec := range records {
 				//log.Printf("last=%s rec=%s", lastTime, rec.When)
 				if !rec.When.After(lastTime) {
-					log.Printf("SKIPPING %+v", rec)
+					if *flagVerbose {
+						log.Printf("SKIPPING %+v", rec)
+					}
 					continue
 				}
-				log.Printf("RECORD %+v", rec)
+				if *flagVerbose {
+					log.Printf("RECORD %+v", rec)
+				}
 				if _, err = insert.Exec(appName,
 					rec.Type, rec.When, rec.SessionID, rec.Text,
 					rec.EventID, rec.Command, rec.Background, rec.RC,
@@ -144,8 +156,8 @@ func main() {
 			log.Fatalf("ERROR %v", err)
 		}
 	}()
-	log.Printf("reading files of %s from %s", appName, logDir)
-	filesch := readFiles(errch, logDir, appName)
+	log.Printf("reading files of %s from %s", prefix, logDir)
+	filesch := readFiles(errch, logDir, prefix)
 	for r := range filesch {
 		if appName == "server" {
 			if err = parsers.ParseServerLog(records, r); err != nil {
@@ -165,13 +177,13 @@ func main() {
 	close(errch)
 }
 
-func readFiles(errch chan<- error, logDir, appName string) <-chan io.ReadCloser {
+func readFiles(errch chan<- error, logDir, prefix string) <-chan io.ReadCloser {
 	filesch := make(chan io.ReadCloser, 2)
 
 	go func() {
 		defer close(filesch)
 		subDir := false
-		dh, err := os.Open(filepath.Join(logDir, appName))
+		dh, err := os.Open(filepath.Join(logDir, prefix))
 		if err == nil {
 			subDir = true
 		} else {
@@ -189,7 +201,7 @@ func readFiles(errch chan<- error, logDir, appName string) <-chan io.ReadCloser 
 		files := make([]os.FileInfo, 0, 4)
 		for _, fi := range infos {
 			if subDir && (fi.Name() == "current" || fi.Name()[0] == '@') ||
-				strings.HasPrefix(fi.Name(), appName) {
+				fnAppPrefix(prefix, fi.Name()) {
 				files = append(files, fi)
 			}
 		}
@@ -207,6 +219,20 @@ func readFiles(errch chan<- error, logDir, appName string) <-chan io.ReadCloser 
 		}
 	}()
 	return filesch
+}
+
+func fnAppPrefix(prefix, fn string) bool {
+	if !strings.HasPrefix(fn, prefix) {
+		return false
+	}
+	if len(fn) == len(prefix) {
+		return true
+	}
+	c := fn[len(prefix)]
+	if 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '_' {
+		return false
+	}
+	return true
 }
 
 func decomprOpen(fn string) (io.ReadCloser, error) {
@@ -257,17 +283,27 @@ func prepareQlDB(params, appName string) (db *sql.DB, insertQry string, lastTime
 		err = fmt.Errorf("error opening ql db: %v", err)
 		return
 	}
-	row := db.QueryRow(`SELECT max(formatTime(F_date, "`+time.RFC3339+`"))
+	empty := true
+	rows, err := db.Query(`SELECT formatTime(F_date, "`+time.RFC3339+`")
         FROM T_log WHERE F_app == $1`, appName)
-	var lt sql.NullString
-	if err = row.Scan(&lt); err == nil {
-		if lt.Valid {
-			if lastTime, err = time.Parse(time.RFC3339, lt.String); err != nil {
-				log.Fatalf("error parsing %s: %v", lt, err)
+	if err == nil {
+		var lt sql.NullString
+		var t time.Time
+		for rows.Next() {
+			if err = rows.Scan(&lt); err == nil {
+				if lt.Valid {
+					if t, err = time.Parse(time.RFC3339, lt.String); err != nil {
+						log.Fatalf("error parsing %s: %v", lt, err)
+					}
+					empty = false
+					if t.After(lastTime) {
+						lastTime = t
+					}
+				}
 			}
 		}
-	} else {
-		log.Printf("%v", err)
+	}
+	if empty {
 		tx, e := db.Begin()
 		if e != nil {
 			err = fmt.Errorf("error beginning transaction: %v", e)
