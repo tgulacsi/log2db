@@ -34,8 +34,6 @@ func ParseServerLog(dest chan<- Record, r io.Reader) error {
 	   Starting
 	   Ended
 	*/
-	defer close(dest)
-
 	scn := NewBasicParser(r)
 	for {
 		var rec Record

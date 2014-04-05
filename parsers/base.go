@@ -52,6 +52,24 @@ type Parser interface {
 	Scan(rec *Record) error
 }
 
+// ParseLog parses a server.log from the reader,
+// returning the Records into the dest channel.
+func ParseLog(dest chan<- Record, r io.Reader) error {
+	scn := NewBasicParser(r)
+	for {
+		var rec Record
+		err := scn.Scan(&rec)
+		// debug("err=%v", err)
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+		dest <- rec
+	}
+}
+
 // NewBasicParser creates a new basic parser
 func NewBasicParser(r io.Reader) Parser {
 	p := &parser{scn: bufio.NewScanner(bufio.NewReader(r)),
