@@ -56,7 +56,7 @@ type Record struct {
 
 // ID returns an app-time-value unique id for this record
 func (rec *Record) ID() []byte {
-	b := bytes.NewBuffer(make([]byte, 32))
+	b := bytes.NewBuffer(make([]byte, 0, 64))
 	b.WriteString(rec.App)
 	b.WriteByte('|')
 	binary.Write(b, binary.BigEndian, rec.When.Unix())

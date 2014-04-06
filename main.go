@@ -30,7 +30,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"unosoft.hu/log2db/parsers"
 	"unosoft.hu/log2db/store"
@@ -67,10 +66,8 @@ func main() {
 
 	var err error
 	var (
-		db        store.DB
-		insertQry string
-		lastTime  time.Time
-		wg        sync.WaitGroup
+		db store.Store
+		wg sync.WaitGroup
 	)
 	if *flagDestDB != "" {
 		i := strings.Index(*flagDestDB, "://")
@@ -87,7 +84,7 @@ func main() {
 			log.Fatalf("unkown db: %s", *flagDestDB)
 		}
 	}
-	log.Printf("db=%v", db)
+	log.Printf("db=%+v", db)
 	records := make(chan parsers.Record, 8)
 	wg.Add(1)
 	if db == nil {
@@ -109,7 +106,7 @@ func main() {
 				if *flagVerbose {
 					log.Printf("RECORD %+v", rec)
 				}
-				if err = db.Insert(appName, rec); err != nil {
+				if err = db.Insert(rec); err != nil {
 					log.Printf("error inserting record: %v", err)
 					continue
 				}

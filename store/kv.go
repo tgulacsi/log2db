@@ -18,6 +18,8 @@ package store
 
 import (
 	"encoding/json"
+	"log"
+	"time"
 
 	"github.com/cznic/kv"
 	"unosoft.hu/log2db/parsers"
@@ -26,24 +28,54 @@ import (
 const (
 	recPrefix    = '!'
 	appTimPrefix = '#'
+	lastsPrefix  = '@'
 )
 
 type kvStore struct {
 	*kv.DB
+	last, act time.Time
+	appName   string
 }
 
 // Open opens the filename
-func OpenKVStore(filename string) (Store, error) {
+func OpenKVStore(filename, appName string) (Store, error) {
 	db, err := kv.Open(filename, &kv.Options{
 		VerifyDbBeforeOpen: true, VerifyDbAfterOpen: true,
 		VerifyDbBeforeClose: true, VerifyDbAfterClose: true})
 	if err != nil {
 		return nil, err
 	}
-	return &kvStore{db}, nil
+
+	store := &kvStore{DB: db, appName: appName}
+	enum, hit, err := db.Seek(lastTimeKey(appName))
+	if err != nil {
+		return nil, err
+	}
+	if hit {
+		_, v, err := enum.Next()
+		if err != nil {
+			return nil, err
+		}
+		if (&store.last).GobDecode(v); err != nil {
+			return nil, err
+		}
+	}
+	return store, nil
 }
 
-func (db *kvStore) Insert(appName string, rec parsers.Record) error {
+func lastTimeKey(appName string) []byte {
+	b := make([]byte, 1, 1+9+len(appName))
+	b[0] = lastsPrefix
+	return append(b, []byte("lastTime:"+appName)...)
+}
+
+func (db *kvStore) Insert(rec parsers.Record) error {
+	if db.last.After(rec.When) {
+		return nil
+	}
+	if db.act.Before(rec.When) {
+		db.act = rec.When
+	}
 	key := make([]byte, 1, 65)
 	key[0] = recPrefix
 	key = append(key, rec.ID()...)
@@ -62,6 +94,14 @@ func (db *kvStore) Insert(appName string, rec parsers.Record) error {
 }
 
 func (db *kvStore) Close() error {
+	v, err := db.act.GobEncode()
+	if err != nil {
+		log.Printf("error encoding time %s: %v", db.act, err)
+	} else {
+		if err = db.DB.Set(lastTimeKey(db.appName), v); err != nil {
+			log.Printf("error setting last time %s: %v", db.act, err)
+		}
+	}
 	commitErr := db.DB.Commit()
 	closeErr := db.DB.Close()
 	if commitErr != nil {
