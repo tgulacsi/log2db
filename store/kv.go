@@ -52,8 +52,8 @@ func OpenKVStore(filename, appName string) (Store, error) {
 		verb = "creating"
 	}
 	opts := &kv.Options{
-		VerifyDbBeforeOpen: true, VerifyDbAfterOpen: true,
-		VerifyDbBeforeClose: true, VerifyDbAfterClose: true,
+		//VerifyDbBeforeOpen: true, VerifyDbAfterOpen: true,
+		//VerifyDbBeforeClose: true, VerifyDbAfterClose: true,
 		Locker: func(dbname string) (io.Closer, error) {
 			lkfile := dbname + ".lock"
 			cl, err := lock.Lock(lkfile)
@@ -124,7 +124,7 @@ func (db *kvStore) Insert(rec parsers.Record) error {
 }
 
 func (db *kvStore) Search(after, before time.Time) (Enumerator, error) {
-	enum, _, err := db.DB.Seek(timeBinary(after))
+	enum, _, err := db.DB.Seek(append([]byte{recPrefix}, timeBinary(after)...))
 	if err != nil {
 		return nil, err
 	}
