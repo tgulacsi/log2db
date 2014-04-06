@@ -39,72 +39,67 @@ import (
 )
 
 var (
-	flagIdentity   = flag.String("i", "$HOME/.ssh/id_rsa", "ssh identity file")
-	flagLogdir     = flag.String("d", "kobed/bruno/data/mai/log", "remote log directory")
+	// global options
 	flagLogfile    = flag.String("logfile", "server.log", "main log file")
 	flagDebug      = flag.Bool("debug", false, "debug prints")
 	flagVerbose    = flag.Bool("verbose", false, "print input records")
-	flagCpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
 	flagMemprofile = flag.String("memprofile", "", "write memory profile to file")
-	flagDestDB     = flag.String("to", "kv://log2db.kvdb", "destination DB URL")
-	flagFilePrefix = flag.String("prefix", "", "filename's prefix - defaults to the app, if not given")
 )
 
 var concurrency = runtime.GOMAXPROCS(0)
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, `Használat: %s [options] app_name log_directory\n`, os.Args[0])
+		fmt.Fprintf(os.Stderr, `Használat: %s [options] <serve|log2db|pull> [args]\n`, os.Args[0])
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
-	flag.Parse()
+	if len(os.Args) < 2 {
+		flag.Usage()
+	}
+	cmd := os.Args[1]
+	if len(os.Args) > 2 {
+		os.Args = append(os.Args[:1], os.Args[2:]...)
+	} else {
+		os.Args = []string{os.Args[0]}
+	}
 
-	parsers.Debug = *flagDebug
-	if flag.NArg() < 2 {
+	switch cmd {
+	case "serve":
+		flagHTTP := flag.String("http", "localhost:8181", "serve on host:port")
+		flagDB := flag.String("db", "kv://log2db.kvdb", "source DB URL")
+		flag.Parse()
+		serveSearch(*flagHTTP, *flagDB)
+	case "log2db":
+		flagFilePrefix := flag.String("prefix", "", "filename's prefix - defaults to the app, if not given")
+		flagDB := flag.String("db", "kv://log2db.kvdb", "destination DB URL")
+		flag.Parse()
+		parsers.Debug = *flagDebug
+		if flag.NArg() < 2 {
+			flag.Usage()
+		}
+		log2db(*flagDB, flag.Arg(0), flag.Arg(1), *flagFilePrefix)
+	case "pull":
+		flagIdentity := flag.String("i", "$HOME/.ssh/id_rsa", "ssh identity file")
+		flagLogdir := flag.String("d", "kobed/bruno/data/mai/log", "remote log directory")
+		flag.Parse()
+		log.Printf("not implemented")
+		_, _ = *flagIdentity, *flagLogdir
+	default:
 		flag.Usage()
 	}
 
-	if *flagCpuprofile != "" {
-		f, err := os.Create(*flagCpuprofile)
-		if err != nil {
-			log.Fatal(err)
-		}
-		pprof.StartCPUProfile(f)
-		defer pprof.StopCPUProfile()
-	}
-	appName := flag.Arg(0)
-	logDir := flag.Arg(1)
-	prefix := *flagFilePrefix
+}
+
+func log2db(dbURI, appName, logDir, prefix string) {
 	if prefix == "" {
 		prefix = appName
 	}
+	var consumers sync.WaitGroup
 
-	var err error
-	var (
-		db        store.Store
-		consumers sync.WaitGroup
-	)
-	if *flagDestDB != "" {
-		i := strings.Index(*flagDestDB, "://")
-		driverName, params := (*flagDestDB)[:i], (*flagDestDB)[i+3:]
-		switch driverName {
-		case "ql":
-			db, err = store.OpenQlStore(params, appName)
-			if err != nil {
-				log.Fatalf("error opening %s: %v", *flagDestDB, err)
-			}
-		case "kv":
-			db, err = store.OpenKVStore(params, appName)
-		default:
-			log.Fatalf("unkown db: %s", *flagDestDB)
-		}
-		if db == nil {
-			log.Fatalf("couldn't open db %s", *flagDestDB)
-		}
-	}
+	db, err := openDbURI(appName, dbURI)
 	log.Printf("db=%+v", db)
-	records := make(chan parsers.Record)
+	records := make(chan parsers.Record, 8*concurrency)
 	consumers.Add(1)
 	if db == nil {
 		go func() {
@@ -173,6 +168,22 @@ func main() {
 	close(records)
 	consumers.Wait()
 	close(errch)
+}
+
+func openDbURI(appName, dbURI string) (store.Store, error) {
+	if dbURI != "" {
+		i := strings.Index(dbURI, "://")
+		driverName, params := dbURI[:i], dbURI[i+3:]
+		switch driverName {
+		case "ql":
+			return store.OpenQlStore(params, appName)
+		case "kv":
+			return store.OpenKVStore(params, appName)
+		default:
+			log.Fatalf("unkown db: %s", dbURI)
+		}
+	}
+	return nil, nil
 }
 
 func readFiles(errch chan<- error, logDir, prefix string) <-chan io.ReadCloser {

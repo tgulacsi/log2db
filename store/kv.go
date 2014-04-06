@@ -17,6 +17,8 @@ limitations under the License.
 package store
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -72,17 +74,19 @@ func OpenKVStore(filename, appName string) (Store, error) {
 	}
 
 	store := &kvStore{DB: db, appName: appName}
-	enum, hit, err := db.Seek(lastTimeKey(appName))
-	if err != nil {
-		return nil, err
-	}
-	if hit {
-		_, v, err := enum.Next()
+	if appName != "" {
+		enum, hit, err := db.Seek(lastTimeKey(appName))
 		if err != nil {
 			return nil, err
 		}
-		if (&store.last).GobDecode(v); err != nil {
-			return nil, err
+		if hit {
+			_, v, err := enum.Next()
+			if err != nil {
+				return nil, err
+			}
+			if (&store.last).GobDecode(v); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return store, nil
@@ -119,6 +123,41 @@ func (db *kvStore) Insert(rec parsers.Record) error {
 	return err
 }
 
+func (db *kvStore) Search(after, before time.Time) (Enumerator, error) {
+	enum, _, err := db.DB.Seek(timeBinary(after))
+	if err != nil {
+		return nil, err
+	}
+	return &kvEnum{Enumerator: enum, before: timeBinary(before)}, nil
+}
+
+type kvEnum struct {
+	*kv.Enumerator
+	before []byte
+	last   []byte
+	err    error
+}
+
+func (en *kvEnum) Next() bool {
+	var key []byte
+	key, en.last, en.err = en.Enumerator.Next()
+	if en.err != nil {
+		return false
+	}
+	if bytes.Compare(key[1:17], en.before) > 0 {
+		en.err = io.EOF
+		return false
+	}
+	return true
+}
+
+func (en *kvEnum) Scan(rec *parsers.Record) error {
+	if en.err != nil {
+		return en.err
+	}
+	return json.Unmarshal(en.last, rec)
+}
+
 func (db *kvStore) Close() error {
 	if err := db.SaveTime(); err != nil {
 		log.Printf("error saving time: %v", err)
@@ -141,4 +180,11 @@ func (db *kvStore) SaveTime() error {
 		}
 	}
 	return nil
+}
+
+func timeBinary(when time.Time) []byte {
+	b := bytes.NewBuffer(make([]byte, 0, 16))
+	binary.Write(b, binary.BigEndian, when.Unix())
+	binary.Write(b, binary.BigEndian, when.Nanosecond())
+	return b.Bytes()
 }

@@ -33,6 +33,12 @@ type Store interface {
 	Insert(rec parsers.Record) error
 	Close() error
 	SaveTime() error
+	Search(after, before time.Time) (Enumerator, error)
+}
+
+type Enumerator interface {
+	Next() bool
+	Scan(*parsers.Record) error
 }
 
 type qlStore struct {
@@ -143,6 +149,25 @@ func (db *qlStore) Insert(rec parsers.Record) error {
 	return nil
 }
 
+func (db *qlStore) Search(after, before time.Time) (Enumerator, error) {
+	rows, err := db.DB.Query(`
+    SELECT F_app, F_type, F_date, F_sid, F_text, F_evid, F_cmd, F_bg, F_rc
+        FROM T_log WHERE F_date BETWEEN $1 AND $2`, after, before)
+	if err != nil {
+		return nil, err
+	}
+	return qlRows{rows}, nil
+}
+
+type qlRows struct {
+	*sql.Rows
+}
+
+func (rs qlRows) Scan(rec *parsers.Record) error {
+	return rs.Rows.Scan(&rec.App, &rec.Type, &rec.When, &rec.SessionID, &rec.Text,
+		&rec.EventID, &rec.Command, &rec.Background, &rec.RC)
+}
+
 func OpenQlStore(params, appName string) (Store, error) {
 	var lastTime time.Time
 	db, err := sql.Open("ql", params)
@@ -158,15 +183,17 @@ func OpenQlStore(params, appName string) (Store, error) {
 		return nil, fmt.Errorf("error creating T_last: %v", err)
 	}
 	tx.Commit()
-	row := db.QueryRow(`SELECT formatTime(F_last, "`+time.RFC3339+`")
+	if appName != "" {
+		row := db.QueryRow(`SELECT formatTime(F_last, "`+time.RFC3339+`")
         FROM T_last WHERE F_app == $1`, appName)
-	var lt sql.NullString
-	if err = row.Scan(&lt); err == nil {
-		if lt.Valid {
-			if lastTime, err = time.Parse(time.RFC3339, lt.String); err != nil {
-				log.Fatalf("error parsing %s: %v", lt, err)
+		var lt sql.NullString
+		if err = row.Scan(&lt); err == nil {
+			if lt.Valid {
+				if lastTime, err = time.Parse(time.RFC3339, lt.String); err != nil {
+					log.Fatalf("error parsing %s: %v", lt, err)
+				}
+				empty = false
 			}
-			empty = false
 		}
 	}
 	if empty {
