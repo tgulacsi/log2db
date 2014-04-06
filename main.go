@@ -45,7 +45,7 @@ var (
 	flagVerbose    = flag.Bool("verbose", false, "print input records")
 	flagCpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
 	flagMemprofile = flag.String("memprofile", "", "write memory profile to file")
-	flagDestDB     = flag.String("to", "ql://xx.qdb", "destination DB URL")
+	flagDestDB     = flag.String("to", "kv://log2db.kvdb", "destination DB URL")
 	flagFilePrefix = flag.String("prefix", "", "filename's prefix - defaults to the app, if not given")
 )
 
