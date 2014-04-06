@@ -18,9 +18,13 @@ package store
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
+	"os"
 	"time"
 
+	"github.com/camlistore/lock"
 	"github.com/cznic/kv"
 	"unosoft.hu/log2db/parsers"
 )
@@ -39,17 +43,33 @@ type kvStore struct {
 
 // Open opens the filename
 func OpenKVStore(filename, appName string) (Store, error) {
+	createOpen := kv.Open
+	verb := "opening"
+	if _, err := os.Stat(filename); os.IsNotExist(err) {
+		createOpen = kv.Create
+		verb = "creating"
+	}
 	opts := &kv.Options{
 		VerifyDbBeforeOpen: true, VerifyDbAfterOpen: true,
-		VerifyDbBeforeClose: true, VerifyDbAfterClose: true}
-	db, err := kv.Create(filename, opts)
-	if err != nil {
-		db, err = kv.Open(filename, opts)
+		VerifyDbBeforeClose: true, VerifyDbAfterClose: true,
+		Locker: func(dbname string) (io.Closer, error) {
+			lkfile := dbname + ".lock"
+			cl, err := lock.Lock(lkfile)
+			if err != nil {
+				return nil, fmt.Errorf("failed to acquire lock on %s: %v", lkfile, err)
+			}
+			return cl, nil
+		},
 	}
+	db, err := createOpen(filename, opts)
+	log.Printf("db==%#v, err=%v", db, err)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error %s %s: %v", verb, filename, err)
 	}
-	log.Printf("db:%#v", db)
+
+	if db == nil {
+		return nil, fmt.Errorf("nil db!")
+	}
 
 	store := &kvStore{DB: db, appName: appName}
 	enum, hit, err := db.Seek(lastTimeKey(appName))
@@ -93,6 +113,7 @@ func (db *kvStore) Insert(rec parsers.Record) error {
 				}
 				return v, true, nil // set
 			}
+			//log.Printf("SKIPping %+v", rec)
 			return nil, false, nil // leave it as were
 		})
 	return err

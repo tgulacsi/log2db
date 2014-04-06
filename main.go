@@ -27,6 +27,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/pprof"
 	"sort"
 	"strings"
@@ -48,6 +49,8 @@ var (
 	flagDestDB     = flag.String("to", "kv://log2db.kvdb", "destination DB URL")
 	flagFilePrefix = flag.String("prefix", "", "filename's prefix - defaults to the app, if not given")
 )
+
+var concurrency = runtime.GOMAXPROCS(0)
 
 func main() {
 	flag.Usage = func() {
@@ -79,8 +82,8 @@ func main() {
 
 	var err error
 	var (
-		db store.Store
-		wg sync.WaitGroup
+		db        store.Store
+		consumers sync.WaitGroup
 	)
 	if *flagDestDB != "" {
 		i := strings.Index(*flagDestDB, "://")
@@ -96,13 +99,16 @@ func main() {
 		default:
 			log.Fatalf("unkown db: %s", *flagDestDB)
 		}
+		if db == nil {
+			log.Fatalf("couldn't open db %s", *flagDestDB)
+		}
 	}
 	log.Printf("db=%+v", db)
-	records := make(chan parsers.Record, 8)
-	wg.Add(1)
+	records := make(chan parsers.Record)
+	consumers.Add(1)
 	if db == nil {
-		defer wg.Done()
 		go func() {
+			defer consumers.Done()
 			for rec := range records {
 				if *flagVerbose {
 					log.Printf("RECORD %+v", rec)
@@ -110,12 +116,11 @@ func main() {
 			}
 		}()
 	} else {
-		defer db.Close()
 		go func() {
-			defer wg.Done()
+			defer db.Close()
+			defer consumers.Done()
 			log.Printf("start listening for records...")
 			for rec := range records {
-				//log.Printf("last=%s rec=%s", lastTime, rec.When)
 				if *flagVerbose {
 					log.Printf("RECORD %+v", rec)
 				}
@@ -135,8 +140,19 @@ func main() {
 		}
 	}()
 	log.Printf("reading files of %s from %s", prefix, logDir)
-	t := time.Now().Add(time.Duration(10) * time.Second)
 	filesch := readFiles(errch, logDir, prefix)
+
+	if *flagMemprofile != "" {
+		for _ = range time.Tick(10 * time.Second) {
+			// stop after one round
+			f, err := os.Create(*flagMemprofile)
+			if err != nil {
+				log.Fatal(err)
+			}
+			pprof.WriteHeapProfile(f)
+			f.Close()
+		}
+	}
 	for r := range filesch {
 		if appName == "server" {
 			if err = parsers.ParseServerLog(records, r, appName); err != nil {
@@ -150,21 +166,9 @@ func main() {
 			}
 		}
 		r.Close()
-
-		if *flagMemprofile != "" && time.Now().After(t) {
-			// stop after one round
-			f, err := os.Create(*flagMemprofile)
-			if err != nil {
-				log.Fatal(err)
-			}
-			pprof.WriteHeapProfile(f)
-			f.Close()
-			return
-		}
-
 	}
 	close(records)
-	wg.Wait()
+	consumers.Wait()
 	close(errch)
 }
 
@@ -189,7 +193,7 @@ func readFiles(errch chan<- error, logDir, prefix string) <-chan io.ReadCloser {
 			errch <- err
 			return
 		}
-		files := make([]os.FileInfo, 0, 4)
+		files := make([]os.FileInfo, 0, concurrency)
 		for _, fi := range infos {
 			if subDir && (fi.Name() == "current" || fi.Name()[0] == '@') ||
 				fnAppPrefix(prefix, fi.Name()) {
