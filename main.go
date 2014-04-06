@@ -166,6 +166,9 @@ func main() {
 			}
 		}
 		r.Close()
+		if err = db.SaveTime(); err != nil {
+			log.Printf("error saving time: %v", err)
+		}
 	}
 	close(records)
 	consumers.Wait()

@@ -32,9 +32,10 @@ import (
 type Store interface {
 	Insert(rec parsers.Record) error
 	Close() error
+	SaveTime() error
 }
 
-type dbStore struct {
+type qlStore struct {
 	*sql.DB
 	appName   string
 	n         int
@@ -45,7 +46,7 @@ type dbStore struct {
 	sync.Mutex
 }
 
-func (db *dbStore) snapshot() (*sql.Stmt, error) {
+func (db *qlStore) snapshot() (*sql.Stmt, error) {
 	if db.tx != nil {
 		db.tx.Commit()
 	}
@@ -60,7 +61,7 @@ func (db *dbStore) snapshot() (*sql.Stmt, error) {
 	return db.insert, nil
 }
 
-func (db *dbStore) Close() error {
+func (db *qlStore) Close() error {
 	db.Lock()
 	defer db.Unlock()
 	var commitErr error
@@ -76,31 +77,8 @@ func (db *dbStore) Close() error {
 		}()
 	}
 	log.Println("transaction")
-	tx, err := db.DB.Begin()
-	if err != nil {
-		log.Printf("error beginning transaction: %v", err)
-	} else {
-		log.Println("Deleting T_last")
-		if _, err = tx.Exec("DELETE FROM T_last WHERE F_app == $1", db.appName); err != nil {
-			log.Printf("error DELETing: %v", err)
-			tx.Rollback()
-		}
-		if err = tx.Commit(); err != nil {
-			log.Printf("commit error: %v", err)
-		}
-		log.Println("deleted.")
-		if tx, err = db.DB.Begin(); err != nil {
-			log.Printf("error beginning transaction: %v", err)
-		} else {
-			log.Printf("inserting last time for %s: %s", db.appName, db.act)
-			if _, err = tx.Exec("INSERT INTO T_last (F_app, F_last) VALUES ($1, $2)",
-				db.appName, db.act,
-			); err != nil {
-				log.Printf("error setting last: %v", err)
-				tx.Commit()
-			}
-			log.Println("INSERTed")
-		}
+	if err := db.SaveTime(); err != nil {
+		log.Printf("error saving time: %v", err)
 	}
 	closeErr := db.DB.Close()
 	if commitErr != nil {
@@ -109,7 +87,41 @@ func (db *dbStore) Close() error {
 	return closeErr
 }
 
-func (db *dbStore) Insert(rec parsers.Record) error {
+func (db *qlStore) SaveTime() error {
+	tx := db.tx
+	var err error
+	if tx == nil {
+		tx, err = db.DB.Begin()
+		if err != nil {
+			log.Printf("error beginning transaction: %v", err)
+		}
+	}
+	log.Println("Deleting T_last")
+	if _, err = tx.Exec("DELETE FROM T_last WHERE F_app == $1", db.appName); err != nil {
+		log.Printf("error DELETing: %v", err)
+		tx.Rollback()
+	}
+	if err = tx.Commit(); err != nil {
+		log.Printf("commit error: %v", err)
+	}
+	log.Println("deleted.")
+	if tx, err = db.DB.Begin(); err != nil {
+		log.Printf("error beginning transaction: %v", err)
+	} else {
+		log.Printf("inserting last time for %s: %s", db.appName, db.act)
+		if _, err = tx.Exec("INSERT INTO T_last (F_app, F_last) VALUES ($1, $2)",
+			db.appName, db.act,
+		); err != nil {
+			log.Printf("error setting last: %v", err)
+			tx.Commit()
+		}
+		log.Println("INSERTed")
+	}
+	db.tx = nil
+	return nil
+}
+
+func (db *qlStore) Insert(rec parsers.Record) error {
 	if db.last.After(rec.When) {
 		// SKIP
 		return nil
@@ -180,7 +192,7 @@ func OpenQlStore(params, appName string) (Store, error) {
 		}
 		tx.Commit()
 	}
-	return &dbStore{
+	return &qlStore{
 		DB:      db,
 		last:    lastTime,
 		appName: appName,

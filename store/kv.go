@@ -120,13 +120,8 @@ func (db *kvStore) Insert(rec parsers.Record) error {
 }
 
 func (db *kvStore) Close() error {
-	v, err := db.act.GobEncode()
-	if err != nil {
-		log.Printf("error encoding time %s: %v", db.act, err)
-	} else {
-		if err = db.DB.Set(lastTimeKey(db.appName), v); err != nil {
-			log.Printf("error setting last time %s: %v", db.act, err)
-		}
+	if err := db.SaveTime(); err != nil {
+		log.Printf("error saving time: %v", err)
 	}
 	commitErr := db.DB.Commit()
 	closeErr := db.DB.Close()
@@ -134,4 +129,16 @@ func (db *kvStore) Close() error {
 		return commitErr
 	}
 	return closeErr
+}
+
+func (db *kvStore) SaveTime() error {
+	v, err := db.act.GobEncode()
+	if err != nil {
+		return err
+	} else {
+		if err = db.DB.Set(lastTimeKey(db.appName), v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
