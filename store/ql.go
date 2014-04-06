@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"unosoft.hu/log2db/parsers"
@@ -41,6 +42,7 @@ type dbStore struct {
 	insertQry string
 	insert    *sql.Stmt
 	tx        *sql.Tx
+	sync.Mutex
 }
 
 func (db *dbStore) snapshot() (*sql.Stmt, error) {
@@ -59,17 +61,47 @@ func (db *dbStore) snapshot() (*sql.Stmt, error) {
 }
 
 func (db *dbStore) Close() error {
+	db.Lock()
+	defer db.Unlock()
 	var commitErr error
-	if db.tx == nil {
-		db.tx, _ = db.DB.Begin()
+	if db.tx != nil {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("panic with Commit(): %v", r)
+				}
+			}()
+			commitErr = db.tx.Commit()
+			db.tx = nil
+		}()
 	}
-	db.tx.Exec("DELETE FROM T_last WHERE F_app == $1", db.appName)
-	if _, err := db.tx.Exec("INSERT INTO T_last (F_app, F_last) VALUES ($1, $2)",
-		db.appName, db.act,
-	); err != nil {
-		log.Printf("error setting last: %v", err)
+	log.Println("transaction")
+	tx, err := db.DB.Begin()
+	if err != nil {
+		log.Printf("error beginning transaction: %v", err)
+	} else {
+		log.Println("Deleting T_last")
+		if _, err = tx.Exec("DELETE FROM T_last WHERE F_app == $1", db.appName); err != nil {
+			log.Printf("error DELETing: %v", err)
+			tx.Rollback()
+		}
+		if err = tx.Commit(); err != nil {
+			log.Printf("commit error: %v", err)
+		}
+		log.Println("deleted.")
+		if tx, err = db.DB.Begin(); err != nil {
+			log.Printf("error beginning transaction: %v", err)
+		} else {
+			log.Printf("inserting last time for %s: %s", db.appName, db.act)
+			if _, err = tx.Exec("INSERT INTO T_last (F_app, F_last) VALUES ($1, $2)",
+				db.appName, db.act,
+			); err != nil {
+				log.Printf("error setting last: %v", err)
+				tx.Commit()
+			}
+			log.Println("INSERTed")
+		}
 	}
-	commitErr = db.tx.Commit()
 	closeErr := db.DB.Close()
 	if commitErr != nil {
 		return commitErr

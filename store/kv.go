@@ -39,12 +39,17 @@ type kvStore struct {
 
 // Open opens the filename
 func OpenKVStore(filename, appName string) (Store, error) {
-	db, err := kv.Open(filename, &kv.Options{
+	opts := &kv.Options{
 		VerifyDbBeforeOpen: true, VerifyDbAfterOpen: true,
-		VerifyDbBeforeClose: true, VerifyDbAfterClose: true})
+		VerifyDbBeforeClose: true, VerifyDbAfterClose: true}
+	db, err := kv.Create(filename, opts)
+	if err != nil {
+		db, err = kv.Open(filename, opts)
+	}
 	if err != nil {
 		return nil, err
 	}
+	log.Printf("db:%#v", db)
 
 	store := &kvStore{DB: db, appName: appName}
 	enum, hit, err := db.Seek(lastTimeKey(appName))

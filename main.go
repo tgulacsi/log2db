@@ -27,9 +27,11 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"unosoft.hu/log2db/parsers"
 	"unosoft.hu/log2db/store"
@@ -41,6 +43,8 @@ var (
 	flagLogfile    = flag.String("logfile", "server.log", "main log file")
 	flagDebug      = flag.Bool("debug", false, "debug prints")
 	flagVerbose    = flag.Bool("verbose", false, "print input records")
+	flagCpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
+	flagMemprofile = flag.String("memprofile", "", "write memory profile to file")
 	flagDestDB     = flag.String("to", "ql://xx.qdb", "destination DB URL")
 	flagFilePrefix = flag.String("prefix", "", "filename's prefix - defaults to the app, if not given")
 )
@@ -56,6 +60,15 @@ func main() {
 	parsers.Debug = *flagDebug
 	if flag.NArg() < 2 {
 		flag.Usage()
+	}
+
+	if *flagCpuprofile != "" {
+		f, err := os.Create(*flagCpuprofile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
 	}
 	appName := flag.Arg(0)
 	logDir := flag.Arg(1)
@@ -122,6 +135,7 @@ func main() {
 		}
 	}()
 	log.Printf("reading files of %s from %s", prefix, logDir)
+	t := time.Now().Add(time.Duration(10) * time.Second)
 	filesch := readFiles(errch, logDir, prefix)
 	for r := range filesch {
 		if appName == "server" {
@@ -136,6 +150,18 @@ func main() {
 			}
 		}
 		r.Close()
+
+		if *flagMemprofile != "" && time.Now().After(t) {
+			// stop after one round
+			f, err := os.Create(*flagMemprofile)
+			if err != nil {
+				log.Fatal(err)
+			}
+			pprof.WriteHeapProfile(f)
+			f.Close()
+			return
+		}
+
 	}
 	close(records)
 	wg.Wait()
