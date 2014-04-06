@@ -1,5 +1,5 @@
 /*
-Copyright 2013 Tamás Gulácsi
+Copyright 2014 Tamás Gulácsi
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,7 +21,6 @@ import (
 	"bytes"
 	"compress/bzip2"
 	"compress/gzip"
-	"database/sql"
 	"flag"
 	"fmt"
 	"io"
@@ -33,8 +32,8 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/cznic/ql/driver"
 	"unosoft.hu/log2db/parsers"
+	"unosoft.hu/log2db/store"
 )
 
 var (
@@ -68,7 +67,7 @@ func main() {
 
 	var err error
 	var (
-		db        *sql.DB
+		db        store.DB
 		insertQry string
 		lastTime  time.Time
 		wg        sync.WaitGroup
@@ -78,10 +77,12 @@ func main() {
 		driverName, params := (*flagDestDB)[:i], (*flagDestDB)[i+3:]
 		switch driverName {
 		case "ql":
-			db, insertQry, lastTime, err = prepareQlDB(params, appName)
+			db, err = store.OpenQlStore(params, appName)
 			if err != nil {
 				log.Fatalf("error opening %s: %v", *flagDestDB, err)
 			}
+		case "kv":
+			db, err = store.OpenKVStore(params, appName)
 		default:
 			log.Fatalf("unkown db: %s", *flagDestDB)
 		}
@@ -100,50 +101,17 @@ func main() {
 		}()
 	} else {
 		defer db.Close()
-		snapshot := func(tx *sql.Tx) (*sql.Tx, *sql.Stmt) {
-			if tx != nil {
-				tx.Commit()
-			}
-			if tx, err = db.Begin(); err != nil {
-				log.Fatalf("error beginning transaction: %v", err)
-			}
-			insert, err := tx.Prepare(insertQry)
-			if err != nil {
-				log.Fatalf("error preparing insert: %v", err)
-			}
-			return tx, insert
-		}
 		go func() {
 			defer wg.Done()
-			n := 0
-			tx, insert := snapshot(nil)
-			defer func() {
-				if tx != nil {
-					tx.Commit()
-				}
-			}()
 			log.Printf("start listening for records...")
 			for rec := range records {
 				//log.Printf("last=%s rec=%s", lastTime, rec.When)
-				if !rec.When.After(lastTime) {
-					if *flagVerbose {
-						log.Printf("SKIPPING %+v", rec)
-					}
-					continue
-				}
 				if *flagVerbose {
 					log.Printf("RECORD %+v", rec)
 				}
-				if _, err = insert.Exec(appName,
-					rec.Type, rec.When, rec.SessionID, rec.Text,
-					rec.EventID, rec.Command, rec.Background, rec.RC,
-				); err != nil {
+				if err = db.Insert(appName, rec); err != nil {
 					log.Printf("error inserting record: %v", err)
 					continue
-				}
-				n++
-				if n%1024 == 0 {
-					tx, insert = snapshot(tx)
 				}
 			}
 		}()
@@ -160,12 +128,12 @@ func main() {
 	filesch := readFiles(errch, logDir, prefix)
 	for r := range filesch {
 		if appName == "server" {
-			if err = parsers.ParseServerLog(records, r); err != nil {
+			if err = parsers.ParseServerLog(records, r, appName); err != nil {
 				r.Close()
 				log.Fatalf("error parsing %q: %v", r, err)
 			}
 		} else {
-			if err = parsers.ParseLog(records, r); err != nil {
+			if err = parsers.ParseLog(records, r, appName); err != nil {
 				r.Close()
 				log.Printf("error parsing %q: %v", r, err)
 			}
@@ -273,63 +241,3 @@ type byMTime []os.FileInfo
 func (a byMTime) Len() int           { return len(a) }
 func (a byMTime) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a byMTime) Less(i, j int) bool { return a[i].ModTime().Before(a[j].ModTime()) }
-
-func prepareQlDB(params, appName string) (db *sql.DB, insertQry string, lastTime time.Time, err error) {
-	defer func() {
-		log.Printf("sql.Open(ql, %q): %s, %s, %v", params, db, lastTime, err)
-	}()
-	db, err = sql.Open("ql", params)
-	if err != nil {
-		err = fmt.Errorf("error opening ql db: %v", err)
-		return
-	}
-	empty := true
-	rows, err := db.Query(`SELECT formatTime(F_date, "`+time.RFC3339+`")
-        FROM T_log WHERE F_app == $1`, appName)
-	if err == nil {
-		var lt sql.NullString
-		var t time.Time
-		for rows.Next() {
-			if err = rows.Scan(&lt); err == nil {
-				if lt.Valid {
-					if t, err = time.Parse(time.RFC3339, lt.String); err != nil {
-						log.Fatalf("error parsing %s: %v", lt, err)
-					}
-					empty = false
-					if t.After(lastTime) {
-						lastTime = t
-					}
-				}
-			}
-		}
-	}
-	if empty {
-		tx, e := db.Begin()
-		if e != nil {
-			err = fmt.Errorf("error beginning transaction: %v", e)
-			return
-		}
-		if _, err = tx.Exec(`CREATE TABLE IF NOT EXISTS T_log (
-                F_app string,
-                F_type int64,
-                F_date time,
-                F_sid int64,
-                F_text string,
-                F_evid int64,
-                F_cmd string,
-                F_bg bool,
-                F_rc int64
-            )`,
-		); err != nil {
-			tx.Rollback()
-			err = fmt.Errorf("error creating table T_log: %v", err)
-			return
-		}
-		tx.Commit()
-	}
-	insertQry = `
-INSERT INTO T_log (F_app, F_type, F_date, F_sid, F_text, F_evid, F_cmd, F_bg, F_rc)
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
-
-	return
-}

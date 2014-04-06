@@ -1,5 +1,5 @@
 /*
-Copyright 2013 Tamás Gulácsi
+Copyright 2014 Tamás Gulácsi
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@ import (
 
 // ParseServerLog parses a server.log from the reader,
 // returning the Records into the dest channel.
-func ParseServerLog(dest chan<- Record, r io.Reader) error {
+func ParseServerLog(dest chan<- Record, r io.Reader, appName string) error {
 	/*
 	   DIR [2013-11-22 11:01:00]: (344194853) $BRUNO_HOME/data/in/elektr
 	   SHELL [2013-11-22 11:03:11]: (344194853) 399384314; '$BRUNO_HOME/bin/E_elektr_load 929206 $BRUNO_HOME/data/in/elektr/'KGFB_105766847_20131116161839_0000333436.txt''; 'E', 0
@@ -34,7 +34,7 @@ func ParseServerLog(dest chan<- Record, r io.Reader) error {
 	   Starting
 	   Ended
 	*/
-	scn := NewBasicParser(r)
+	scn := NewBasicParser(r, appName)
 	for {
 		var rec Record
 		err := scn.Scan(&rec)

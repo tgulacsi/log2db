@@ -1,5 +1,5 @@
 /*
-Copyright 2013 Tamás Gulácsi
+Copyright 2014 Tamás Gulácsi
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,13 +19,56 @@ package parsers
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"strconv"
 	"time"
 )
+
+// RecordType designates the record type (DIR/SHELL/SYSLOG...)
+type RecordType uint8
+
+const (
+	RtUnknown = RecordType(iota)
+	RtDir
+	RtShell
+	RtSyslog
+	RtOther
+)
+
+// Record is the structure of one log record
+type Record struct {
+	App        string     `json:"a"`
+	Type       RecordType `json:"t"`
+	When       time.Time  `json:"d"`
+	SessionID  int64      `json:"sid"`
+	Text       string     `json:"text"`
+	EventID    int64      `json:"evid"`
+	Command    string     `json:"cmd"`
+	Background bool       `json:"bg"`
+	RC         uint8      `json:"rc"`
+}
+
+// ID returns an app-time-value unique id for this record
+func (rec *Record) ID() []byte {
+	b := bytes.NewBuffer(make([]byte, 32))
+	b.WriteString(rec.App)
+	b.WriteByte('|')
+	binary.Write(b, binary.BigEndian, rec.When.Unix())
+	binary.Write(b, binary.BigEndian, rec.When.Nanosecond())
+	b.WriteByte('|')
+	h := fnv.New64a()
+	if err := json.NewEncoder(h).Encode(rec); err != nil {
+		log.Printf("error encoding %v: %v", rec, err)
+	}
+	binary.Write(b, binary.BigEndian, h.Sum64())
+	return b.Bytes()
+}
 
 // Debug makes the program print enormous amount of debug output
 var Debug bool
@@ -45,6 +88,7 @@ type parser struct {
 	actTime, lastTime time.Time
 	actRT, lastRT     RecordType
 	actSID, lastSID   int64
+	appName           string
 }
 
 type Parser interface {
@@ -54,8 +98,8 @@ type Parser interface {
 
 // ParseLog parses a server.log from the reader,
 // returning the Records into the dest channel.
-func ParseLog(dest chan<- Record, r io.Reader) error {
-	scn := NewBasicParser(r)
+func ParseLog(dest chan<- Record, r io.Reader, appName string) error {
+	scn := NewBasicParser(r, appName)
 	for {
 		var rec Record
 		err := scn.Scan(&rec)
@@ -71,9 +115,10 @@ func ParseLog(dest chan<- Record, r io.Reader) error {
 }
 
 // NewBasicParser creates a new basic parser
-func NewBasicParser(r io.Reader) Parser {
+func NewBasicParser(r io.Reader, appName string) Parser {
 	p := &parser{scn: bufio.NewScanner(bufio.NewReader(r)),
-		buf: bytes.NewBuffer(make([]byte, 0, 1024))}
+		buf:     bytes.NewBuffer(make([]byte, 0, 1024)),
+		appName: appName}
 	p.scn.Split(bufio.ScanLines)
 	return p
 }
@@ -97,6 +142,7 @@ func (p *parser) Scan(rec *Record) error {
 			debug("cannot parse time from %q: %v", line, err)
 		} else { // new record's beginning
 			if p.buf.Len() > 0 {
+				rec.App = p.appName
 				rec.When = p.lastTime
 				rec.Type = p.lastRT
 				rec.SessionID = p.lastSID
@@ -121,6 +167,7 @@ func (p *parser) Scan(rec *Record) error {
 		return err
 	}
 	if p.buf.Len() > 0 {
+		rec.App = p.appName
 		rec.When = p.lastTime
 		rec.Type = p.lastRT
 		rec.SessionID = p.lastSID
@@ -205,27 +252,4 @@ func parseServerlogTime(tim *time.Time, line []byte) ([]byte, RecordType, int64,
 		return line, rt, sid, fmt.Errorf("error parsing %q as sid: %v", line[:i], err)
 	}
 	return line[i+2:], rt, sid, nil
-}
-
-// RecordType designates the record type (DIR/SHELL/SYSLOG...)
-type RecordType uint8
-
-const (
-	RtUnknown = RecordType(iota)
-	RtDir
-	RtShell
-	RtSyslog
-	RtOther
-)
-
-// Record is the structure of one log record
-type Record struct {
-	Type       RecordType `json:"t"`
-	When       time.Time  `json:"d"`
-	SessionID  int64      `json:"sid"`
-	Text       string     `json:"text"`
-	EventID    int64      `json:"evid"`
-	Command    string     `json:"cmd"`
-	Background bool       `json:"bg"`
-	RC         uint8      `json:"rc"`
 }
