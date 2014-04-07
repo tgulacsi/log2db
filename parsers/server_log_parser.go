@@ -19,16 +19,20 @@ package parsers
 import (
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"unosoft.hu/log2db/record"
 )
 
 // ParseServerLog parses a server.log from the reader,
 // returning the record.Records into the dest channel.
-func ParseServerLog(dest chan<- record.Record, r io.Reader, appName string) error {
+func ParseServerLog(dest chan<- record.Record, r io.Reader, logDir, appName string) error {
 	/*
 	   DIR [2013-11-22 11:01:00]: (344194853) $BRUNO_HOME/data/in/elektr
 	   SHELL [2013-11-22 11:03:11]: (344194853) 399384314; '$BRUNO_HOME/bin/E_elektr_load 929206 $BRUNO_HOME/data/in/elektr/'KGFB_105766847_20131116161839_0000333436.txt''; 'E', 0
@@ -51,7 +55,7 @@ func ParseServerLog(dest chan<- record.Record, r io.Reader, appName string) erro
 		case record.RtSyslog:
 			rec.Text = getApostrophedInner(rec.Text)
 		case record.RtShell:
-			if err = parseShell(&rec); err != nil {
+			if err = parseShell(&rec, logDir); err != nil {
 				log.Printf("error parsing %#v: %v", rec, err)
 			}
 		}
@@ -59,7 +63,7 @@ func ParseServerLog(dest chan<- record.Record, r io.Reader, appName string) erro
 	}
 }
 
-func parseShell(rec *record.Record) error {
+func parseShell(rec *record.Record, logDir string) error {
 	line := rec.Text
 	i := strings.Index(line, ";")
 	if i < 0 {
@@ -90,6 +94,66 @@ func parseShell(rec *record.Record) error {
 		return fmt.Errorf("cannot parse %q as int (rc): %v", rcb, err)
 	}
 	rec.RC = uint8(res)
+
+	if logDir == "" || rec.EventID == 0 {
+		return nil
+	}
+
+	if err = readExternalLogfile(rec, logDir); err != nil {
+		log.Printf("error reading external logfile: %v", err)
+	}
+	return nil
+}
+
+var (
+	dirListsMu sync.Mutex
+	dirLists   = make(map[string][]string, 1)
+)
+
+func readExternalLogfile(rec *record.Record, logDir string) error {
+	bn := fmt.Sprintf("shell_%d.log", rec.EventID)
+	var fn string
+	var r io.ReadCloser
+	if fh, err := os.Open(filepath.Join(logDir, bn)); err == nil {
+		r = fh
+		fn = fh.Name()
+	} else {
+		dirListsMu.Lock()
+		defer dirListsMu.Unlock()
+		names, ok := dirLists[logDir]
+		if !ok {
+			dh, err := os.Open(logDir)
+			if err != nil {
+				return fmt.Errorf("error opening logdir %s: %v", logDir, err)
+			}
+			names, err = dh.Readdirnames(-1)
+			dh.Close()
+			if err != nil {
+				return fmt.Errorf("error reading names of %s: %v", logDir, err)
+			}
+			dirLists[logDir] = names
+		}
+		for _, nm := range names {
+			if strings.HasPrefix(nm, bn) {
+				fn = filepath.Join(logDir, nm)
+				r, err = DecomprOpen(fn)
+				if err != nil {
+					return fmt.Errorf("error opening %s: %v", fn, err)
+				}
+				break
+			}
+		}
+	}
+
+	if r == nil {
+		return fmt.Errorf("cannot find %s in %s", bn, logDir)
+	}
+	b, err := ioutil.ReadAll(r)
+	r.Close()
+	if err != nil {
+		return fmt.Errorf("error reading file %s: %v", fn, err)
+	}
+	rec.Text = string(b)
 	return nil
 }
 

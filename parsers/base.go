@@ -19,10 +19,13 @@ package parsers
 import (
 	"bufio"
 	"bytes"
+	"compress/bzip2"
+	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"strconv"
 	"time"
 
@@ -211,4 +214,37 @@ func parseServerlogTime(tim *time.Time, line []byte) ([]byte, record.RecordType,
 		return line, rt, sid, fmt.Errorf("error parsing %q as sid: %v", line[:i], err)
 	}
 	return line[i+2:], rt, sid, nil
+}
+
+func DecomprOpen(fn string) (io.ReadCloser, error) {
+	fh, err := os.Open(fn)
+	if err != nil {
+		return nil, err
+	}
+	b := bufio.NewReader(fh)
+	for {
+		buf, err := b.Peek(8)
+		if err != nil {
+			fh.Close()
+			return nil, err
+		}
+		if bytes.Equal(buf[:3], []byte("BZh")) {
+			cr := bzip2.NewReader(b)
+			b = bufio.NewReader(cr)
+			continue
+		}
+		if buf[0] == 0x1f && buf[1] == 0x8b {
+			cr, err := gzip.NewReader(b)
+			if err != nil {
+				return nil, err
+			}
+			b = bufio.NewReader(cr)
+			continue
+		}
+		break
+	}
+	return struct {
+		io.Reader
+		io.Closer
+	}{b, fh}, nil
 }

@@ -97,13 +97,13 @@ func (db *oraStore) SaveTimes() error {
 	if err != nil {
 		return err
 	}
-	log.Println("Deleting T_last")
+	//log.Println("Deleting T_last")
 	if _, err = tx.Exec("DELETE FROM W_GT_times WHERE F_app = ?", db.appName); err != nil {
 		log.Printf("error DELETing: %v", err)
 		tx.Rollback()
 		return err
 	}
-	log.Printf("inserting last time for %s: %s", db.appName, db.act)
+	//log.Printf("inserting last time for %s: %s", db.appName, db.act)
 	if _, err = tx.Exec("INSERT INTO W_GT_times (F_app, F_first, F_last) VALUES (?, ?, ?)",
 		db.appName, db.first, db.act,
 	); err != nil {
@@ -111,7 +111,7 @@ func (db *oraStore) SaveTimes() error {
 		return fmt.Errorf("error setting times: %v", err)
 	}
 	tx.Commit()
-	log.Println("INSERTed")
+	//log.Println("INSERTed")
 	return nil
 }
 

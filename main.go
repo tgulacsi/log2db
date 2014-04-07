@@ -17,10 +17,6 @@ limitations under the License.
 package main
 
 import (
-	"bufio"
-	"bytes"
-	"compress/bzip2"
-	"compress/gzip"
 	"expvar"
 	"flag"
 	"fmt"
@@ -157,7 +153,7 @@ func log2db(dbURI, appName, logDir, prefix string) {
 	}
 	for r := range filesch {
 		if appName == "server" {
-			if err = parsers.ParseServerLog(records, r, appName); err != nil {
+			if err = parsers.ParseServerLog(records, r, logDir, appName); err != nil {
 				r.Close()
 				log.Fatalf("error parsing %q: %v", r, err)
 			}
@@ -241,7 +237,7 @@ func readFiles(errch chan<- error, logDir, prefix string) <-chan io.ReadCloser {
 		for _, fi := range files {
 			fn := filepath.Join(dh.Name(), fi.Name())
 			log.Printf("fn=%q", fn)
-			r, err := decomprOpen(fn)
+			r, err := parsers.DecomprOpen(fn)
 			if err != nil {
 				errch <- err
 				return
@@ -264,39 +260,6 @@ func fnAppPrefix(prefix, fn string) bool {
 		return false
 	}
 	return true
-}
-
-func decomprOpen(fn string) (io.ReadCloser, error) {
-	fh, err := os.Open(fn)
-	if err != nil {
-		return nil, err
-	}
-	b := bufio.NewReader(fh)
-	for {
-		buf, err := b.Peek(8)
-		if err != nil {
-			fh.Close()
-			return nil, err
-		}
-		if bytes.Equal(buf[:3], []byte("BZh")) {
-			cr := bzip2.NewReader(b)
-			b = bufio.NewReader(cr)
-			continue
-		}
-		if buf[0] == 0x1f && buf[1] == 0x8b {
-			cr, err := gzip.NewReader(b)
-			if err != nil {
-				return nil, err
-			}
-			b = bufio.NewReader(cr)
-			continue
-		}
-		break
-	}
-	return struct {
-		io.Reader
-		io.Closer
-	}{b, fh}, nil
 }
 
 type byMTime []os.FileInfo
