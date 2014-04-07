@@ -51,6 +51,7 @@ func (db *qlStore) snapshot() (*sql.Stmt, error) {
 		db.tx.Commit()
 	}
 	if db.insert != nil {
+		log.Printf("closing %s", db.insert)
 		db.insert.Close()
 	}
 	var err error
@@ -125,6 +126,7 @@ func (db *qlStore) SaveTimes() error {
 }
 
 func (db *qlStore) Insert(rec record.Record) error {
+	log.Printf("Insert(%s)", rec.When)
 	if db.first.IsZero() {
 		db.first = rec.When
 	}
@@ -141,12 +143,14 @@ func (db *qlStore) Insert(rec record.Record) error {
 			return err
 		}
 	}
+	log.Printf("insert=%s, n=%d", db.insert, db.n)
 	if _, err := db.insert.Exec(rec.App, rec.Type, rec.When, rec.SessionID,
 		rec.Text, rec.EventID, rec.Command, rec.Background, rec.RC,
 		base64.StdEncoding.EncodeToString(rec.ID()),
 	); err != nil {
 		return err
 	}
+	log.Printf("inserted.")
 	insertedNum.Add(1)
 	return nil
 }
@@ -189,7 +193,17 @@ func openQlStore(params, appName string) (Store, error) {
 		row := db.QueryRow(`SELECT formatTime(F_first, "`+time.RFC3339+`"), formatTime(F_last, "`+time.RFC3339+`")
         FROM T_times WHERE F_app == $1`, appName)
 		var ft, lt sql.NullString
-		if err = row.Scan(&ft, &lt); err == nil {
+		if err = row.Scan(&ft, &lt); err != nil || !ft.Valid || !lt.Valid {
+			if !ft.Valid {
+				row = db.QueryRow(`SELECT formatTime(F_date, "`+time.RFC3339+`") FROM T_log WHERE F_app = $1 ORDER BY F_date LIMIT 1`, appName)
+				err = row.Scan(&ft)
+			}
+			if !lt.Valid {
+				row = db.QueryRow(`SELECT formatTime(F_date, "`+time.RFC3339+`") FROM T_log WHERE F_app = $1 ORDER BY F_date DESC LIMIT 1`, appName)
+				err = row.Scan(&lt)
+			}
+		}
+		if err == nil {
 			if ft.Valid {
 				if firstTime, err = time.Parse(time.RFC3339, ft.String); err != nil {
 					log.Fatalf("error parsing %s: %v", ft, err)
@@ -225,12 +239,14 @@ func openQlStore(params, appName string) (Store, error) {
 			tx.Rollback()
 			return nil, fmt.Errorf("error creating table T_log: %v", err)
 		}
-		if _, err = tx.Exec(`CREATE UNIQUE INDEX U_log ON T_log(F_id)`); err != nil {
-			log.Printf("error creating U_log: %v", err)
-		}
-		if _, err = tx.Exec(`CREATE INDEX K_log_date ON T_log(F_date)`); err != nil {
-			log.Printf("error creating K_log_date: %v", err)
-		}
+		/*
+			if _, err = tx.Exec(`CREATE UNIQUE INDEX U_log ON T_log(F_id)`); err != nil {
+				log.Printf("error creating U_log: %v", err)
+			}
+			if _, err = tx.Exec(`CREATE INDEX K_log_date ON T_log(F_date)`); err != nil {
+				log.Printf("error creating K_log_date: %v", err)
+			}
+		*/
 		tx.Commit()
 	}
 	return &qlStore{

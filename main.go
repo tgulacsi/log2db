@@ -183,6 +183,9 @@ func log2db(dbURI, appName, logDir, prefix string) {
 func openDbURI(appName, dbURI string) (db store.Store, err error) {
 	if dbURI != "" {
 		i := strings.Index(dbURI, "://")
+		if i < 0 {
+			return nil, fmt.Errorf("dbURI should be in driver://params format, but got %q", dbURI)
+		}
 		driverName, params := dbURI[:i], dbURI[i+3:]
 		switch driverName {
 		case "ql":

@@ -18,9 +18,11 @@ package store
 
 import (
 	"bytes"
+	"compress/flate"
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"os"
 	"time"
@@ -35,7 +37,8 @@ const (
 	appTimPrefix = '#'
 	timesPrefix  = '@'
 
-	maxKVLength = 65787
+	maxKVLength          = 65787
+	compressionThreshold = 4096
 )
 
 type kvStore struct {
@@ -166,6 +169,8 @@ func timeKey(appName string, first bool) ([]byte, func()) {
 	return b, func() { timeKeyPool.Release(b) }
 }
 
+var marshalPool = NewBytesPool(8)
+
 func (db *kvStore) Insert(rec record.Record) error {
 	//log.Printf("Insert(%s)", rec)
 	if db.last.After(rec.When) {
@@ -183,14 +188,42 @@ func (db *kvStore) Insert(rec record.Record) error {
 		func(k, v []byte) ([]byte, bool, error) {
 			if v == nil { // not exists
 				var e error
-				if v, e = json.Marshal(rec); e != nil {
+				var w io.WriteCloser
+				b := marshalPool.Acquire(512)
+				defer func() { marshalPool.Release(b) }()
+
+				cb := bytes.NewBuffer(b)
+				if len(rec.Text) < compressionThreshold {
+					w = struct {
+						io.Writer
+						io.Closer
+					}{cb, ioutil.NopCloser(nil)}
+				} else {
+					cb.WriteByte(0)
+					w, e = flate.NewWriter(cb, flate.BestCompression)
+					if e != nil {
+						e = fmt.Errorf("error creating compressor: %v", e)
+						log.Println(e.Error())
+						return nil, false, e
+					}
+				}
+
+				if e = json.NewEncoder(w).Encode(rec); e != nil {
 					log.Printf("error marshaling %+v: %v", rec, e)
 					return nil, false, e
-				} else if len(v) > maxKVLength {
+				}
+				if e = w.Close(); e != nil {
+					e = fmt.Errorf("error writing to compressor: %v", e)
+					log.Println(e.Error())
+					return nil, false, e
+				}
+				if cb.Len() > maxKVLength {
 					e = fmt.Errorf("error inserting %+v: too long (%d, max %d)", rec, len(v), maxKVLength)
 					log.Println(e.Error())
 					return nil, false, e
 				}
+				v = cb.Bytes()
+
 				insertedNum.Add(1)
 				return v, true, nil // set
 			}
@@ -237,7 +270,11 @@ func (en *kvEnum) Scan(rec *record.Record) error {
 	if en.err != nil {
 		return en.err
 	}
-	return json.Unmarshal(en.last, rec)
+	if len(en.last) < 1 || en.last[0] != 0 {
+		return json.Unmarshal(en.last, rec)
+	}
+	// compressed
+	return json.NewDecoder(flate.NewReader(bytes.NewReader(en.last[1:]))).Decode(rec)
 }
 
 func (db *kvStore) Close() error {
