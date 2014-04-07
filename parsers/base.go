@@ -19,56 +19,15 @@ package parsers
 import (
 	"bufio"
 	"bytes"
-	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"log"
 	"strconv"
 	"time"
+
+	"unosoft.hu/log2db/record"
 )
-
-// RecordType designates the record type (DIR/SHELL/SYSLOG...)
-type RecordType uint8
-
-const (
-	RtUnknown = RecordType(iota)
-	RtDir
-	RtShell
-	RtSyslog
-	RtOther
-)
-
-// Record is the structure of one log record
-type Record struct {
-	App        string     `json:"a"`
-	Type       RecordType `json:"t"`
-	When       time.Time  `json:"d"`
-	SessionID  int64      `json:"sid"`
-	Text       string     `json:"text"`
-	EventID    int64      `json:"evid"`
-	Command    string     `json:"cmd"`
-	Background bool       `json:"bg"`
-	RC         uint8      `json:"rc"`
-}
-
-// ID returns an app-time-value unique id for this record
-func (rec *Record) ID() []byte {
-	b := bytes.NewBuffer(make([]byte, 0, 64))
-	binary.Write(b, binary.BigEndian, rec.When.Unix())
-	binary.Write(b, binary.BigEndian, rec.When.Nanosecond())
-	b.WriteByte('|')
-	b.WriteString(rec.App)
-	b.WriteByte('|')
-	h := fnv.New64a()
-	if err := json.NewEncoder(h).Encode(rec); err != nil {
-		log.Printf("error encoding %v: %v", rec, err)
-	}
-	binary.Write(b, binary.BigEndian, h.Sum64())
-	return b.Bytes()
-}
 
 // Debug makes the program print enormous amount of debug output
 var Debug bool
@@ -86,22 +45,22 @@ type parser struct {
 	scn               *bufio.Scanner
 	buf               *bytes.Buffer
 	actTime, lastTime time.Time
-	actRT, lastRT     RecordType
+	actRT, lastRT     record.RecordType
 	actSID, lastSID   int64
 	appName           string
 }
 
 type Parser interface {
 	// Scan scans the next record into the given destination
-	Scan(rec *Record) error
+	Scan(rec *record.Record) error
 }
 
 // ParseLog parses a server.log from the reader,
 // returning the Records into the dest channel.
-func ParseLog(dest chan<- Record, r io.Reader, appName string) error {
+func ParseLog(dest chan<- record.Record, r io.Reader, appName string) error {
 	scn := NewBasicParser(r, appName)
 	for {
-		var rec Record
+		var rec record.Record
 		err := scn.Scan(&rec)
 		// debug("err=%v", err)
 		if err != nil {
@@ -123,7 +82,7 @@ func NewBasicParser(r io.Reader, appName string) Parser {
 	return p
 }
 
-func (p *parser) Scan(rec *Record) error {
+func (p *parser) Scan(rec *record.Record) error {
 	var (
 		rest []byte
 		err  error
@@ -176,12 +135,12 @@ func (p *parser) Scan(rec *Record) error {
 	return io.EOF
 }
 
-func parseTime(tim *time.Time, line []byte) ([]byte, RecordType, int64, error) {
+func parseTime(tim *time.Time, line []byte) ([]byte, record.RecordType, int64, error) {
 	var err error
 	if bytes.HasPrefix(line, []byte("SYSLOG [")) || bytes.HasPrefix(line, []byte("DIR [")) || bytes.HasPrefix(line, []byte("SHELL [")) {
 		return parseServerlogTime(tim, line)
 	}
-	rt := RecordType(RtUnknown)
+	rt := record.RecordType(record.RtUnknown)
 	if line[0] != '2' {
 		return line, rt, 0, ErrUnfinished
 	}
@@ -221,18 +180,18 @@ func parseTime(tim *time.Time, line []byte) ([]byte, RecordType, int64, error) {
 	return line[i+1:], rt, 0, nil
 }
 
-func parseServerlogTime(tim *time.Time, line []byte) ([]byte, RecordType, int64, error) {
+func parseServerlogTime(tim *time.Time, line []byte) ([]byte, record.RecordType, int64, error) {
 	i := bytes.IndexByte(line, '[')
-	rt, sid := RecordType(RtUnknown), int64(0)
+	rt, sid := record.RecordType(record.RtUnknown), int64(0)
 	switch string(line[:i-1]) {
 	case "SYSLOG":
-		rt = RecordType(RtSyslog)
+		rt = record.RecordType(record.RtSyslog)
 	case "SHELL":
-		rt = RecordType(RtShell)
+		rt = record.RecordType(record.RtShell)
 	case "DIR":
-		rt = RecordType(RtDir)
+		rt = record.RecordType(record.RtDir)
 	default:
-		rt = RecordType(RtOther)
+		rt = record.RecordType(record.RtOther)
 	}
 	line = line[i+1:]
 	i = bytes.Index(line, []byte("]: ("))

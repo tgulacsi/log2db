@@ -23,7 +23,7 @@ import (
 	"strconv"
 	"time"
 
-	"unosoft.hu/log2db/parsers"
+	"unosoft.hu/log2db/record"
 	"unosoft.hu/log2db/store"
 )
 
@@ -88,7 +88,7 @@ func (p pager) mainPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	n := 0
-	var rec parsers.Record
+	var rec record.Record
 	for n < limit && enum.Next() {
 		if err = enum.Scan(&rec); err != nil {
 			log.Printf("error enumerating: %v", err)

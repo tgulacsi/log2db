@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"compress/bzip2"
 	"compress/gzip"
+	"expvar"
 	"flag"
 	"fmt"
 	"io"
@@ -35,6 +36,7 @@ import (
 	"time"
 
 	"unosoft.hu/log2db/parsers"
+	"unosoft.hu/log2db/record"
 	"unosoft.hu/log2db/store"
 )
 
@@ -98,10 +100,16 @@ func log2db(dbURI, appName, logDir, prefix string) {
 	var consumers sync.WaitGroup
 
 	db, err := openDbURI(appName, dbURI)
+	if err != nil {
+		log.Fatalf("error opening %q: %v", dbURI, err)
+	}
 	log.Printf("db=%+v", db)
-	records := make(chan parsers.Record, 8*concurrency)
+	records := make(chan record.Record, 8*concurrency)
 	consumers.Add(1)
 	if db == nil {
+		if dbURI != "" {
+			log.Fatalf("%q => nil DB!", dbURI)
+		}
 		go func() {
 			defer consumers.Done()
 			for rec := range records {
@@ -112,7 +120,6 @@ func log2db(dbURI, appName, logDir, prefix string) {
 		}()
 	} else {
 		go func() {
-			defer db.Close()
 			defer consumers.Done()
 			log.Printf("start listening for records...")
 			for rec := range records {
@@ -161,29 +168,44 @@ func log2db(dbURI, appName, logDir, prefix string) {
 			}
 		}
 		r.Close()
-		if err = db.SaveTime(); err != nil {
-			log.Printf("error saving time: %v", err)
+		if db != nil {
+			if err = db.SaveTimes(); err != nil {
+				log.Printf("error saving time: %v", err)
+			}
 		}
+	}
+	if db != nil {
+		defer db.Close()
 	}
 	close(records)
 	consumers.Wait()
 	close(errch)
+
+	log.Printf("skipped %s, inserted %s records.", expvar.Get("storeSkipped"), expvar.Get("storeInserted"))
 }
 
-func openDbURI(appName, dbURI string) (store.Store, error) {
+func openDbURI(appName, dbURI string) (db store.Store, err error) {
 	if dbURI != "" {
 		i := strings.Index(dbURI, "://")
 		driverName, params := dbURI[:i], dbURI[i+3:]
 		switch driverName {
 		case "ql":
-			return store.OpenQlStore(params, appName)
+			db, err = store.OpenQlStore(params, appName)
 		case "kv":
-			return store.OpenKVStore(params, appName)
+			db, err = store.OpenKVStore(params, appName)
+		case "ora":
+			db, err = store.OpenOraStore(params, appName)
 		default:
 			log.Fatalf("unkown db: %s", dbURI)
 		}
+		if err != nil {
+			return nil, err
+		}
+		if db == nil {
+			log.Fatalf("NIL db of %q", dbURI)
+		}
 	}
-	return nil, nil
+	return
 }
 
 func readFiles(errch chan<- error, logDir, prefix string) <-chan io.ReadCloser {

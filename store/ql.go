@@ -1,3 +1,5 @@
+// +build ql
+
 /*
 Copyright 2014 Tamás Gulácsi
 
@@ -24,37 +26,32 @@ import (
 	"sync"
 	"time"
 
-	"unosoft.hu/log2db/parsers"
+	"unosoft.hu/log2db/record"
 
 	_ "github.com/cznic/ql/driver"
 )
 
-type Store interface {
-	Insert(rec parsers.Record) error
-	Close() error
-	SaveTime() error
-	Search(after, before time.Time) (Enumerator, error)
-}
-
-type Enumerator interface {
-	Next() bool
-	Scan(*parsers.Record) error
+func init() {
+	OpenQlStore = openQlStore
 }
 
 type qlStore struct {
 	*sql.DB
-	appName   string
-	n         int
-	last, act time.Time
-	insertQry string
-	insert    *sql.Stmt
-	tx        *sql.Tx
+	appName          string
+	n                int
+	first, last, act time.Time
+	insertQry        string
+	insert           *sql.Stmt
+	tx               *sql.Tx
 	sync.Mutex
 }
 
 func (db *qlStore) snapshot() (*sql.Stmt, error) {
 	if db.tx != nil {
 		db.tx.Commit()
+	}
+	if db.insert != nil {
+		db.insert.Close()
 	}
 	var err error
 	if db.tx, err = db.Begin(); err != nil {
@@ -83,7 +80,7 @@ func (db *qlStore) Close() error {
 		}()
 	}
 	log.Println("transaction")
-	if err := db.SaveTime(); err != nil {
+	if err := db.SaveTimes(); err != nil {
 		log.Printf("error saving time: %v", err)
 	}
 	closeErr := db.DB.Close()
@@ -93,7 +90,7 @@ func (db *qlStore) Close() error {
 	return closeErr
 }
 
-func (db *qlStore) SaveTime() error {
+func (db *qlStore) SaveTimes() error {
 	tx := db.tx
 	var err error
 	if tx == nil {
@@ -102,8 +99,8 @@ func (db *qlStore) SaveTime() error {
 			log.Printf("error beginning transaction: %v", err)
 		}
 	}
-	log.Println("Deleting T_last")
-	if _, err = tx.Exec("DELETE FROM T_last WHERE F_app == $1", db.appName); err != nil {
+	log.Println("Deleting T_times")
+	if _, err = tx.Exec("DELETE FROM T_times WHERE F_app == $1", db.appName); err != nil {
 		log.Printf("error DELETing: %v", err)
 		tx.Rollback()
 	}
@@ -115,10 +112,10 @@ func (db *qlStore) SaveTime() error {
 		log.Printf("error beginning transaction: %v", err)
 	} else {
 		log.Printf("inserting last time for %s: %s", db.appName, db.act)
-		if _, err = tx.Exec("INSERT INTO T_last (F_app, F_last) VALUES ($1, $2)",
-			db.appName, db.act,
+		if _, err = tx.Exec("INSERT INTO T_times (F_app, F_first, F_last) VALUES ($1, $2, $3)",
+			db.appName, db.first, db.act,
 		); err != nil {
-			log.Printf("error setting last: %v", err)
+			log.Printf("error setting times: %v", err)
 			tx.Commit()
 		}
 		log.Println("INSERTed")
@@ -127,9 +124,13 @@ func (db *qlStore) SaveTime() error {
 	return nil
 }
 
-func (db *qlStore) Insert(rec parsers.Record) error {
+func (db *qlStore) Insert(rec record.Record) error {
+	if db.first.IsZero() {
+		db.first = rec.When
+	}
 	if db.last.After(rec.When) {
 		// SKIP
+		skippedNum.Add(1)
 		return nil
 	}
 	if db.act.Before(rec.When) {
@@ -146,13 +147,14 @@ func (db *qlStore) Insert(rec parsers.Record) error {
 	); err != nil {
 		return err
 	}
+	insertedNum.Add(1)
 	return nil
 }
 
 func (db *qlStore) Search(after, before time.Time) (Enumerator, error) {
 	rows, err := db.DB.Query(`
     SELECT F_app, F_type, F_date, F_sid, F_text, F_evid, F_cmd, F_bg, F_rc
-        FROM T_log WHERE F_date BETWEEN $1 AND $2`, after, before)
+        FROM T_log WHERE F_date >= $1 AND F_date <= $2`, after, before)
 	if err != nil {
 		return nil, err
 	}
@@ -163,13 +165,13 @@ type qlRows struct {
 	*sql.Rows
 }
 
-func (rs qlRows) Scan(rec *parsers.Record) error {
+func (rs qlRows) Scan(rec *record.Record) error {
 	return rs.Rows.Scan(&rec.App, &rec.Type, &rec.When, &rec.SessionID, &rec.Text,
 		&rec.EventID, &rec.Command, &rec.Background, &rec.RC)
 }
 
-func OpenQlStore(params, appName string) (Store, error) {
-	var lastTime time.Time
+func openQlStore(params, appName string) (Store, error) {
+	var firstTime, lastTime time.Time
 	db, err := sql.Open("ql", params)
 	if err != nil {
 		return nil, fmt.Errorf("error opening ql db: %v", err)
@@ -179,15 +181,21 @@ func OpenQlStore(params, appName string) (Store, error) {
 	if e != nil {
 		return nil, fmt.Errorf("error beginning transaction: %v", e)
 	}
-	if _, err = tx.Exec(`CREATE TABLE IF NOT EXISTS T_last (F_app string, F_last time)`); err != nil {
-		return nil, fmt.Errorf("error creating T_last: %v", err)
+	if _, err = tx.Exec(`CREATE TABLE IF NOT EXISTS T_times (F_app string, F_first time, F_last time)`); err != nil {
+		return nil, fmt.Errorf("error creating T_times: %v", err)
 	}
 	tx.Commit()
 	if appName != "" {
-		row := db.QueryRow(`SELECT formatTime(F_last, "`+time.RFC3339+`")
-        FROM T_last WHERE F_app == $1`, appName)
-		var lt sql.NullString
-		if err = row.Scan(&lt); err == nil {
+		row := db.QueryRow(`SELECT formatTime(F_first, "`+time.RFC3339+`"), formatTime(F_last, "`+time.RFC3339+`")
+        FROM T_times WHERE F_app == $1`, appName)
+		var ft, lt sql.NullString
+		if err = row.Scan(&ft, &lt); err == nil {
+			if ft.Valid {
+				if firstTime, err = time.Parse(time.RFC3339, ft.String); err != nil {
+					log.Fatalf("error parsing %s: %v", ft, err)
+				}
+				empty = false
+			}
 			if lt.Valid {
 				if lastTime, err = time.Parse(time.RFC3339, lt.String); err != nil {
 					log.Fatalf("error parsing %s: %v", lt, err)
@@ -217,10 +225,17 @@ func OpenQlStore(params, appName string) (Store, error) {
 			tx.Rollback()
 			return nil, fmt.Errorf("error creating table T_log: %v", err)
 		}
+		if _, err = tx.Exec(`CREATE UNIQUE INDEX U_log ON T_log(F_id)`); err != nil {
+			log.Printf("error creating U_log: %v", err)
+		}
+		if _, err = tx.Exec(`CREATE INDEX K_log_date ON T_log(F_date)`); err != nil {
+			log.Printf("error creating K_log_date: %v", err)
+		}
 		tx.Commit()
 	}
 	return &qlStore{
 		DB:      db,
+		first:   firstTime,
 		last:    lastTime,
 		appName: appName,
 		insertQry: `

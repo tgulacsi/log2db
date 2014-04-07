@@ -22,11 +22,13 @@ import (
 	"log"
 	"strconv"
 	"strings"
+
+	"unosoft.hu/log2db/record"
 )
 
 // ParseServerLog parses a server.log from the reader,
-// returning the Records into the dest channel.
-func ParseServerLog(dest chan<- Record, r io.Reader, appName string) error {
+// returning the record.Records into the dest channel.
+func ParseServerLog(dest chan<- record.Record, r io.Reader, appName string) error {
 	/*
 	   DIR [2013-11-22 11:01:00]: (344194853) $BRUNO_HOME/data/in/elektr
 	   SHELL [2013-11-22 11:03:11]: (344194853) 399384314; '$BRUNO_HOME/bin/E_elektr_load 929206 $BRUNO_HOME/data/in/elektr/'KGFB_105766847_20131116161839_0000333436.txt''; 'E', 0
@@ -36,7 +38,7 @@ func ParseServerLog(dest chan<- Record, r io.Reader, appName string) error {
 	*/
 	scn := NewBasicParser(r, appName)
 	for {
-		var rec Record
+		var rec record.Record
 		err := scn.Scan(&rec)
 		// debug("err=%v", err)
 		if err != nil {
@@ -46,9 +48,9 @@ func ParseServerLog(dest chan<- Record, r io.Reader, appName string) error {
 			return err
 		}
 		switch rec.Type {
-		case RtSyslog:
+		case record.RtSyslog:
 			rec.Text = getApostrophedInner(rec.Text)
-		case RtShell:
+		case record.RtShell:
 			if err = parseShell(&rec); err != nil {
 				log.Printf("error parsing %#v: %v", rec, err)
 			}
@@ -57,7 +59,7 @@ func ParseServerLog(dest chan<- Record, r io.Reader, appName string) error {
 	}
 }
 
-func parseShell(rec *Record) error {
+func parseShell(rec *record.Record) error {
 	line := rec.Text
 	i := strings.Index(line, ";")
 	if i < 0 {
