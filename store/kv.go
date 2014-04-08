@@ -19,7 +19,9 @@ package store
 import (
 	"bytes"
 	"compress/flate"
+	"crypto/sha1"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -27,19 +29,24 @@ import (
 	"os"
 	"time"
 
+	"unosoft.hu/log2db/record"
+
 	"github.com/camlistore/lock"
 	"github.com/cznic/kv"
-	"unosoft.hu/log2db/record"
 )
 
 const (
 	recPrefix    = '!'
 	appTimPrefix = '#'
+	chunkPrefix  = '$'
 	timesPrefix  = '@'
 
 	maxKVLength          = 65787
 	compressionThreshold = 4096
+	chunkAddrLength      = 1 + sha1.Size
 )
+
+var errTooLong = errors.New("too long")
 
 type kvStore struct {
 	*kv.DB
@@ -136,7 +143,7 @@ func findFirstTime(dest *time.Time, db *kv.DB, appName string) error {
 		return fmt.Errorf("key %v is too short (%d)! %q", k, len(k), k)
 	}
 	if err = record.UnmarshalTime(dest, k[1:]); err != nil {
-		return fmt.Errorf("error unmarshaling %v as time: %v", err)
+		return fmt.Errorf("error unmarshaling %q as time: %v", k[1:], err)
 	}
 	return nil
 }
@@ -148,7 +155,7 @@ var keyPool = NewBytesPool(4)
 func getKeyFor(t time.Time, appName string) ([]byte, func()) {
 	key := keyPool.Acquire(64)[:1]
 	key[0] = recPrefix
-	key = key[0 : 1+len(record.MarshalTime(key[1:cap(key)], time.Time{}))]
+	key = key[0 : 1+len(record.MarshalTime(key[1:cap(key)], t))]
 	key = append(key, '|')
 	if appName != "" {
 		key = append(append(append(key, []byte(appName)...), '|'), zHashBytes...)
@@ -183,75 +190,113 @@ func (db *kvStore) Insert(rec record.Record) error {
 	}
 	key := make([]byte, 1, 65)
 	key[0] = recPrefix
+	var tooLong []byte
 	key = append(key, rec.ID()...)
 	_, _, err := db.DB.Put(nil, key,
 		func(k, v []byte) ([]byte, bool, error) {
-			if v == nil { // not exists
-				var e error
-				var w io.WriteCloser
-				b := marshalPool.Acquire(512)
-				defer func() { marshalPool.Release(b) }()
-
-				cb := bytes.NewBuffer(b)
-				if len(rec.Text) < compressionThreshold {
-					w = struct {
-						io.Writer
-						io.Closer
-					}{cb, ioutil.NopCloser(nil)}
-				} else {
-					cb.WriteByte(0)
-					w, e = flate.NewWriter(cb, flate.BestCompression)
-					if e != nil {
-						e = fmt.Errorf("error creating compressor: %v", e)
-						log.Println(e.Error())
-						return nil, false, e
-					}
-				}
-
-				if e = json.NewEncoder(w).Encode(rec); e != nil {
-					log.Printf("error marshaling %+v: %v", rec, e)
-					return nil, false, e
-				}
-				if e = w.Close(); e != nil {
-					e = fmt.Errorf("error writing to compressor: %v", e)
-					log.Println(e.Error())
-					return nil, false, e
-				}
-				if cb.Len() > maxKVLength {
-					e = fmt.Errorf("error inserting %+v: too long (%d, max %d)", rec, len(v), maxKVLength)
-					log.Println(e.Error())
-					return nil, false, e
-				}
-				v = cb.Bytes()
-
-				insertedNum.Add(1)
-				return v, true, nil // set
+			if v != nil { // already exists
+				//log.Printf("SKIPping %+v", rec)
+				skippedNum.Add(1)
+				return nil, false, nil // leave it as were
 			}
-			//log.Printf("SKIPping %+v", rec)
-			skippedNum.Add(1)
-			return nil, false, nil // leave it as were
+			var e error
+			var w io.WriteCloser
+			b := marshalPool.Acquire(512)[:0]
+			defer func() { marshalPool.Release(b) }()
+
+			cb := bytes.NewBuffer(b)
+			if len(rec.Text) < compressionThreshold {
+				w = struct {
+					io.Writer
+					io.Closer
+				}{cb, ioutil.NopCloser(nil)}
+			} else {
+				w, e = flate.NewWriter(cb, flate.BestCompression)
+				if e != nil {
+					e = fmt.Errorf("error creating compressor: %v", e)
+					log.Println(e.Error())
+					return nil, false, e
+				}
+			}
+
+			if e = json.NewEncoder(w).Encode(rec); e != nil {
+				log.Printf("error marshaling %+v: %v", rec, e)
+				return nil, false, e
+			}
+			if e = w.Close(); e != nil {
+				e = fmt.Errorf("error writing to compressor: %v", e)
+				log.Println(e.Error())
+				return nil, false, e
+			}
+			if cb.Len() > maxKVLength {
+				log.Printf("TOO LONG (%d, max %d)", cb.Len(), maxKVLength)
+				tooLong = cb.Bytes()
+				return nil, false, errTooLong
+			}
+			v = cb.Bytes()
+
+			insertedNum.Add(1)
+			return v, true, nil // set
 		})
+
+	if err == errTooLong {
+		v := []byte{1}
+		chunkKey := make([]byte, chunkAddrLength)
+		chunkKey[0] = chunkPrefix
+		tLen := 0
+		for i := 0; i < len(tooLong); {
+			n := maxKVLength
+			if i+n > len(tooLong) {
+				n = len(tooLong) - i
+			}
+			h := sha1.Sum(tooLong[i : i+n])
+			copy(chunkKey[1:], h[:])
+			log.Printf("chunkKey=%c%x", chunkKey[0], chunkKey[1:])
+
+			if _, _, err = db.DB.Put(nil, chunkKey,
+				func(k, v []byte) ([]byte, bool, error) {
+					if v != nil { // exists
+						return nil, false, nil
+					}
+					return tooLong[i : i+n], true, nil
+				}); err != nil {
+				//if err = db.DB.Set(chunkKey, tooLong[i:i+n]); err != nil {
+				log.Printf("error setting chunk %q: %v", chunkKey, err)
+				return err
+			}
+			tLen += n
+			log.Printf("chunk %c%x", chunkKey[0], chunkKey[1:])
+			v = append(v, chunkKey...)
+			i += n
+		}
+		err = db.DB.Set(key, v)
+		log.Printf("%q: %d (%x: %v)", key, tLen, v, err)
+	}
 	return err
 }
 
 func (db *kvStore) Search(after, before time.Time) (Enumerator, error) {
-	key, closer := getKeyFor(after, db.appName)
-	enum, _, err := db.DB.Seek(key)
+	afterK, closer := getKeyFor(after, db.appName)
+	enum, _, err := db.DB.Seek(afterK)
 	if err != nil {
 		closer()
 		return nil, err
 	}
 	closer()
-	key, _ = getKeyFor(before, db.appName)
-	return &kvEnum{Enumerator: enum, before: key}, nil
+	beforeK, _ := getKeyFor(before, db.appName)
+	//log.Printf("Search(%q, %q (%s))", afterK, beforeK, before)
+	return &kvEnum{DB: db.DB, Enumerator: enum, before: beforeK}, nil
 }
 
 type kvEnum struct {
+	*kv.DB
 	*kv.Enumerator
 	before []byte
 	last   []byte
 	err    error
 }
+
+var enumPool = NewBytesPool(16)
 
 func (en *kvEnum) Next() bool {
 	var key []byte
@@ -263,6 +308,7 @@ func (en *kvEnum) Next() bool {
 		en.err = io.EOF
 		return false
 	}
+	//log.Printf("key=%q val=%x", key, en.last)
 	return true
 }
 
@@ -270,15 +316,45 @@ func (en *kvEnum) Scan(rec *record.Record) error {
 	if en.err != nil {
 		return en.err
 	}
-	if len(en.last) < 1 || en.last[0] != 0 {
+	if len(en.last) < 1 || en.last[0] == '{' {
 		return json.Unmarshal(en.last, rec)
 	}
-	// compressed
-	return json.NewDecoder(flate.NewReader(bytes.NewReader(en.last[1:]))).Decode(rec)
+	k := 100
+	if len(en.last) < 100 {
+		k = len(en.last)
+	}
+	log.Printf("last=%x", en.last[:k])
+	if en.last[0] == 0 {
+		// compressed
+		return json.NewDecoder(flate.NewReader(bytes.NewReader(en.last[1:]))).Decode(rec)
+	}
+	// list of compressed chunks
+	var (
+		val    []byte
+		err    error
+		n      = (len(en.last) - 1) / chunkAddrLength
+		key    = make([]byte, chunkAddrLength)
+		chunks = make([]io.Reader, n)
+	)
+	log.Printf("reading from %d chunks", n)
+	tLen := 0
+	for i := 0; i < n; i++ {
+		key = en.last[1+i*chunkAddrLength : 1+(i+1)*chunkAddrLength]
+		log.Printf("retrieving %x", key[1:])
+		//if val, err = en.DB.Get(nil, key); err != nil {
+		if val, err = en.DB.Get(enumPool.Acquire(maxKVLength)[:0], key); err != nil {
+			log.Printf("error retrieving chunk %q: %v", key, err)
+			return err
+		}
+		chunks[i] = bytes.NewReader(val)
+		tLen += len(val)
+		defer func() { enumPool.Release(val) }()
+	}
+	log.Printf("assembled total length: %d", tLen)
+	return json.NewDecoder(flate.NewReader(io.MultiReader(chunks...))).Decode(rec)
 }
 
 func (db *kvStore) Close() error {
-	log.Printf("closing %s", db)
 	commitErr := db.DB.Commit()
 	if commitErr != nil {
 		log.Printf("error commiting: %v", commitErr)
@@ -318,7 +394,7 @@ func (db *kvStore) SaveTimes() error {
 			key, closer := timeKey(db.appName, first)
 			defer closer()
 			if err = db.DB.Set(key, v); err != nil {
-				log.Printf("error setting %t time for %s: %v", first, db.appName)
+				log.Printf("error setting %t time for %s: %v", first, db.appName, err)
 				return err
 			}
 			log.Printf("set time %t for %s: %s", first, db.appName, t)

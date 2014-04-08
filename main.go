@@ -122,7 +122,7 @@ func log2db(dbURI, appName, logDir, prefix string) {
 				if *flagVerbose {
 					log.Printf("RECORD %+v", rec)
 				}
-				if err = db.Insert(rec); err != nil {
+				if err := db.Insert(rec); err != nil {
 					log.Printf("error inserting record: %v", err)
 					continue
 				}

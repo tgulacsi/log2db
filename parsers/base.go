@@ -181,7 +181,7 @@ func parseTime(tim *time.Time, line []byte) ([]byte, record.RecordType, int64, e
 		return line, rt, 0, fmt.Errorf("error parsing %q as time: %v", line[:i], err)
 	}
 	if len(line) <= i+1 {
-		return nil, rt, 0, fmt.Errorf("error parsing %q: i=%d len=%d", i, len(line))
+		return nil, rt, 0, fmt.Errorf("error parsing %q: i=%d len=%d", line, i, len(line))
 	}
 	return line[i+1:], rt, 0, nil
 }

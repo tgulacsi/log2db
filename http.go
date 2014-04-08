@@ -56,6 +56,9 @@ func (p pager) mainPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("bad before: %v", err), 400)
 		return
 	}
+	if before.IsZero() {
+		before = time.Now()
+	}
 	var limit int
 	limitS := r.FormValue("limit")
 	if limitS != "" {

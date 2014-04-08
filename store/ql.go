@@ -41,50 +41,74 @@ type qlStore struct {
 	n                int
 	first, last, act time.Time
 	insertQry        string
-	insert           *sql.Stmt
-	tx               *sql.Tx
-	sync.Mutex
+	insert           *txStmt
+	sync.RWMutex
 }
 
-func (db *qlStore) snapshot() (*sql.Stmt, error) {
-	if db.tx != nil {
-		db.tx.Commit()
-	}
-	if db.insert != nil {
-		log.Printf("closing %s", db.insert)
-		db.insert.Close()
+type txStmt struct {
+	*sql.Tx
+	*sql.Stmt
+}
+
+func (db *qlStore) getStmt(commit bool) (*sql.Stmt, error) {
+	db.RLock()
+	insert := db.insert
+	db.RUnlock()
+	if insert != nil && insert.Stmt != nil {
+		if commit {
+			log.Printf("COMMIT %p", insert.Tx)
+			if err := insert.Tx.Commit(); err != nil {
+				return nil, err
+			}
+			db.Lock()
+			db.insert = nil
+			db.Unlock()
+		} else {
+			return db.insert.Stmt, nil
+		}
+	} else {
+		insert = new(txStmt)
 	}
 	var err error
-	if db.tx, err = db.Begin(); err != nil {
+	if insert.Tx, err = db.DB.Begin(); err != nil {
 		return nil, fmt.Errorf("error beginning transaction: %v", err)
 	}
-	db.insert, err = db.tx.Prepare(db.insertQry)
+	insert.Stmt, err = insert.Tx.Prepare(db.insertQry)
 	if err != nil {
 		return nil, fmt.Errorf("error preparing insert: %v", err)
 	}
-	return db.insert, nil
+	db.Lock()
+	db.insert = insert
+	db.Unlock()
+	return insert.Stmt, nil
 }
 
 func (db *qlStore) Close() error {
+	if err := db.SaveTimes(); err != nil {
+		log.Printf("error saving time: %v", err)
+	}
+
 	db.Lock()
 	defer db.Unlock()
 	var commitErr error
-	if db.tx != nil {
+	if db.insert != nil {
+		insert := db.insert
+		db.insert = nil
+		if insert.Stmt != nil {
+			insert.Stmt.Close()
+		}
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
 					log.Printf("panic with Commit(): %v", r)
 				}
 			}()
-			commitErr = db.tx.Commit()
-			db.tx = nil
+			commitErr = insert.Tx.Commit()
 		}()
 	}
 	log.Println("transaction")
-	if err := db.SaveTimes(); err != nil {
-		log.Printf("error saving time: %v", err)
-	}
 	closeErr := db.DB.Close()
+	db.DB = nil
 	if commitErr != nil {
 		return commitErr
 	}
@@ -92,64 +116,67 @@ func (db *qlStore) Close() error {
 }
 
 func (db *qlStore) SaveTimes() error {
-	tx := db.tx
-	var err error
-	if tx == nil {
-		tx, err = db.DB.Begin()
-		if err != nil {
-			log.Printf("error beginning transaction: %v", err)
-		}
+	db.RLock()
+	defer db.RUnlock()
+	if db.act.IsZero() {
+		return nil
+	}
+	tx, err := db.DB.Begin()
+	if err != nil {
+		log.Printf("error beginning transaction: %v", err)
 	}
 	log.Println("Deleting T_times")
 	if _, err = tx.Exec("DELETE FROM T_times WHERE F_app == $1", db.appName); err != nil {
 		log.Printf("error DELETing: %v", err)
 		tx.Rollback()
-	}
-	if err = tx.Commit(); err != nil {
-		log.Printf("commit error: %v", err)
+		return err
 	}
 	log.Println("deleted.")
-	if tx, err = db.DB.Begin(); err != nil {
-		log.Printf("error beginning transaction: %v", err)
-	} else {
-		log.Printf("inserting last time for %s: %s", db.appName, db.act)
-		if _, err = tx.Exec("INSERT INTO T_times (F_app, F_first, F_last) VALUES ($1, $2, $3)",
-			db.appName, db.first, db.act,
-		); err != nil {
-			log.Printf("error setting times: %v", err)
-			tx.Commit()
-		}
-		log.Println("INSERTed")
+	log.Printf("inserting last time for %s: %s", db.appName, db.act)
+	if _, err = tx.Exec("INSERT INTO T_times (F_app, F_first, F_last) VALUES ($1, $2, $3)",
+		db.appName, db.first, db.act,
+	); err != nil {
+		log.Printf("error setting times: %v", err)
+		tx.Rollback()
+		return err
 	}
-	db.tx = nil
+	log.Println("INSERTed")
+	if err = tx.Commit(); err != nil {
+		log.Printf("error commiting: %v", err)
+		return err
+	}
 	return nil
 }
 
 func (db *qlStore) Insert(rec record.Record) error {
 	log.Printf("Insert(%s)", rec.When)
+	db.RLock()
 	if db.first.IsZero() {
 		db.first = rec.When
 	}
 	if db.last.After(rec.When) {
 		// SKIP
 		skippedNum.Add(1)
+		db.RUnlock()
 		return nil
 	}
 	if db.act.Before(rec.When) {
 		db.act = rec.When
 	}
-	if db.insert == nil || db.n%1000 == 0 {
-		if _, err := db.snapshot(); err != nil {
-			return err
-		}
+	db.RUnlock()
+	stmt, err := db.getStmt(true) // db.n%1000 == 0
+	if err != nil {
+		log.Printf("error getting statement: %v", err)
+		return err
 	}
 	log.Printf("insert=%s, n=%d", db.insert, db.n)
-	if _, err := db.insert.Exec(rec.App, rec.Type, rec.When, rec.SessionID,
+	if _, err := stmt.Exec(rec.App, rec.Type, rec.When, rec.SessionID,
 		rec.Text, rec.EventID, rec.Command, rec.Background, rec.RC,
 		base64.StdEncoding.EncodeToString(rec.ID()),
 	); err != nil {
 		return err
 	}
+	db.n++
 	log.Printf("inserted.")
 	insertedNum.Add(1)
 	return nil
