@@ -239,7 +239,8 @@ func (db *kvStore) Insert(rec record.Record) error {
 			return v, true, nil // set
 		})
 
-	if err == errTooLong {
+	// we are ok till 196Mb of compressed data
+	if err == errTooLong && (len(tooLong)+maxKVLength-1)/maxKVLength <= (maxKVLength-1)/chunkAddrLength {
 		v := []byte{1}
 		chunkKey := make([]byte, chunkAddrLength)
 		chunkKey[0] = chunkPrefix
