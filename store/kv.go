@@ -31,8 +31,8 @@ import (
 
 	"unosoft.hu/log2db/record"
 
-	"github.com/camlistore/lock"
 	"github.com/cznic/kv"
+	"github.com/tgulacsi/lock"
 )
 
 const (
@@ -305,7 +305,14 @@ func (en *kvEnum) Next() bool {
 	if en.err != nil {
 		return false
 	}
-	if bytes.Compare(key[:len(en.before)], en.before) > 0 {
+	n := minInt(len(key), len(en.before))
+	if n == 0 {
+		if len(key) == 0 {
+			return false
+		}
+		return true
+	}
+	if bytes.Compare(key[:n], en.before) > 0 {
 		en.err = io.EOF
 		return false
 	}
@@ -402,4 +409,11 @@ func (db *kvStore) SaveTimes() error {
 		}
 	}
 	return nil
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

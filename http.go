@@ -18,6 +18,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -90,6 +91,12 @@ func (p pager) mainPage(w http.ResponseWriter, r *http.Request) {
 		flush = flusher.Flush
 	}
 
+	fmt.Fprintln(w, `<table><thead><tr><th>When</th><th>App</th>
+        <th>Text</th><th>sid</th><th>eid</th><th>command</th><th>RC</th></tr>
+        </thead><tbody>`)
+	td := func(s string) {
+		io.WriteString(w, "<td>"+s+"</td>")
+	}
 	n := 0
 	var rec record.Record
 	for n < limit && enum.Next() {
@@ -98,13 +105,21 @@ func (p pager) mainPage(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "<br/>\nerror enumerating: %v", err)
 			break
 		}
-		fmt.Fprintf(w, "<p>%s</p>\n", rec)
+		io.WriteString(w, "<tr>")
+		td(rec.When.String())
+		td(rec.App)
+		td(rec.Text)
+		td(strconv.FormatInt(rec.SessionID, 10))
+		td(strconv.FormatInt(rec.EventID, 10))
+		td(rec.Command)
+		td(strconv.Itoa(int(rec.RC)))
+		io.WriteString(w, "</tr>\n")
 		n++
 		if n%100 == 0 {
 			flush()
 		}
 	}
-	fmt.Fprintf(w, `<body></html>`)
+	fmt.Fprintf(w, `</tbody></table><body></html>`)
 }
 
 func parseDate(dt string) (time.Time, error) {
