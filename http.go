@@ -89,6 +89,7 @@ func (p pager) mainPage(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 	}
+	defer enum.Close()
 	flush := func() {}
 	if flusher, ok := w.(http.Flusher); ok {
 		flush = flusher.Flush

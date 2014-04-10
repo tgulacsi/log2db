@@ -17,8 +17,11 @@ limitations under the License.
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"expvar"
+	"fmt"
+	"log"
 	"time"
 
 	"unosoft.hu/log2db/record"
@@ -34,11 +37,17 @@ type Store interface {
 type Enumerator interface {
 	Next() bool
 	Scan(*record.Record) error
+	Close() error
 }
 
 var (
-	OpenOraStore = func(params, appName string, concurrency int) (Store, error) { return nil, errors.New("not implemented") }
-	OpenQlStore  = func(params, appName string) (Store, error) { return nil, errors.New("not implemented") }
+	OpenOraStore = func(params, appName string, concurrency int) (Store, error) {
+		return nil, errors.New("not implemented")
+	}
+	OpenPgStore = func(params, appName string, concurrency int) (Store, error) {
+		return nil, errors.New("not implemented")
+	}
+	OpenQlStore = func(params, appName string) (Store, error) { return nil, errors.New("not implemented") }
 )
 
 var (
@@ -74,4 +83,90 @@ func (p bytesPool) Release(b []byte) {
 	case p.ch <- b:
 	default:
 	}
+}
+
+type dbPool struct {
+	*sql.DB
+	insertQry string
+	txPool    chan txStmt
+}
+
+type txStmt struct {
+	*sql.Tx
+	*sql.Stmt
+	n int32
+}
+
+func (db *dbPool) getTx() (stmt *sql.Tx, release func(bool) error, err error) {
+	insert, release, err := db.get()
+	if err != nil {
+		return nil, nil, err
+	}
+	return insert.Tx, release, nil
+}
+
+func (db *dbPool) getStmt() (stmt *sql.Stmt, release func(bool) error, err error) {
+	insert, release, err := db.get()
+	if err != nil {
+		return nil, nil, err
+	}
+	return insert.Stmt, release, nil
+}
+
+func (db *dbPool) get() (both txStmt, release func(bool) error, err error) {
+	select {
+	case both = <-db.txPool:
+	default:
+		if both.Tx, err = db.DB.Begin(); err != nil {
+			return both, nil, fmt.Errorf("error beginning transaction: %v", err)
+		}
+		both.Stmt, err = both.Tx.Prepare(db.insertQry)
+		if err != nil {
+			return both, nil, fmt.Errorf("error preparing insert: %v", err)
+		}
+	}
+	return both, func(commit bool) error {
+		if commit {
+			log.Printf("COMMIT %p", both.Tx)
+			if err := both.Tx.Commit(); err != nil {
+				return err
+			}
+			return nil
+		}
+		select {
+		case db.txPool <- both:
+		default:
+		}
+		return nil
+	}, nil
+}
+
+func (db *dbPool) Close() error {
+	var (
+		commitErr error
+		insert    txStmt
+	)
+Loop:
+	for {
+		select {
+		case insert = <-db.txPool:
+			if insert.Tx != nil {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("panic with Commit(): %v", r)
+						}
+					}()
+					commitErr = insert.Tx.Commit()
+				}()
+			}
+		default:
+			break Loop
+		}
+	}
+	closeErr := db.DB.Close()
+	if commitErr != nil {
+		return commitErr
+	}
+	return closeErr
 }

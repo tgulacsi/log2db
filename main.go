@@ -211,6 +211,8 @@ func openDbURI(appName, dbURI string) (db store.Store, err error) {
 			db, err = store.OpenKVStore(params, appName)
 		case "ora":
 			db, err = store.OpenOraStore(params, appName, concurrency)
+		case "pg":
+			db, err = store.OpenPgStore(params, appName, concurrency)
 		default:
 			log.Fatalf("unkown db: %s", dbURI)
 		}
