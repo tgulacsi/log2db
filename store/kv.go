@@ -256,9 +256,11 @@ func (db *kvStore) Insert(rec record.Record) error {
 
 			if _, _, err = db.DB.Put(nil, chunkKey,
 				func(k, v []byte) ([]byte, bool, error) {
-					if v != nil { // exists
+					if len(v) > 0 && len(v) == n { // exists
+						log.Printf("skipping %x", k)
 						return nil, false, nil
 					}
+					log.Printf("adding %d length to %x", len(tooLong[i:i+n]), chunkKey)
 					return tooLong[i : i+n], true, nil
 				}); err != nil {
 				//if err = db.DB.Set(chunkKey, tooLong[i:i+n]); err != nil {
@@ -301,23 +303,27 @@ var enumPool = NewBytesPool(16)
 
 func (en *kvEnum) Next() bool {
 	var key []byte
-	key, en.last, en.err = en.Enumerator.Next()
-	if en.err != nil {
-		return false
-	}
-	n := minInt(len(key), len(en.before))
-	if n == 0 {
-		if len(key) == 0 {
+	for {
+		key, en.last, en.err = en.Enumerator.Next()
+		log.Printf("key=%x err=%v", key, en.err)
+		if en.err != nil {
 			return false
+		}
+		if len(key) == 0 {
+			continue
+		}
+		if len(en.before) > 0 {
+			n := minInt(len(key), len(en.before))
+			if n >= len(en.before) && bytes.Compare(key[:n], en.before) > 0 {
+				en.err = io.EOF
+				return false
+			}
+		}
+		if len(en.last) == 0 {
+			continue
 		}
 		return true
 	}
-	if bytes.Compare(key[:n], en.before) > 0 {
-		en.err = io.EOF
-		return false
-	}
-	//log.Printf("key=%q val=%x", key, en.last)
-	return true
 }
 
 func (en *kvEnum) Scan(rec *record.Record) error {
@@ -338,23 +344,26 @@ func (en *kvEnum) Scan(rec *record.Record) error {
 	}
 	// list of compressed chunks
 	var (
-		val    []byte
 		err    error
 		n      = (len(en.last) - 1) / chunkAddrLength
 		key    = make([]byte, chunkAddrLength)
-		chunks = make([]io.Reader, n)
+		chunks = make([]io.Reader, 0, n)
 	)
 	log.Printf("reading from %d chunks", n)
 	tLen := 0
 	for i := 0; i < n; i++ {
 		key = en.last[1+i*chunkAddrLength : 1+(i+1)*chunkAddrLength]
 		log.Printf("retrieving %x", key[1:])
-		//if val, err = en.DB.Get(nil, key); err != nil {
-		if val, err = en.DB.Get(enumPool.Acquire(maxKVLength)[:0], key); err != nil {
+		val := enumPool.Acquire(maxKVLength)[:0]
+		if val, err = en.DB.Get(val, key); err != nil {
 			log.Printf("error retrieving chunk %q: %v", key, err)
 			return err
 		}
-		chunks[i] = bytes.NewReader(val)
+		if len(val) == 0 {
+			log.Printf("%x is zero length?", key[1:])
+			continue
+		}
+		chunks = append(chunks, bytes.NewReader(val))
 		tLen += len(val)
 		defer func() { enumPool.Release(val) }()
 	}

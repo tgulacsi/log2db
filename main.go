@@ -93,7 +93,7 @@ func log2db(dbURI, appName, logDir, prefix string) {
 	if prefix == "" {
 		prefix = appName
 	}
-	var consumers sync.WaitGroup
+	var producers, consumers sync.WaitGroup
 
 	db, err := openDbURI(appName, dbURI)
 	if err != nil {
@@ -115,19 +115,29 @@ func log2db(dbURI, appName, logDir, prefix string) {
 			}
 		}()
 	} else {
-		go func() {
-			defer consumers.Done()
-			log.Printf("start listening for records...")
-			for rec := range records {
-				if *flagVerbose {
-					log.Printf("RECORD %+v", rec)
+		c := 1
+		if strings.HasPrefix(dbURI, "ora://") {
+			c = concurrency
+		}
+
+		for i := 0; i < c; i++ {
+			go func() {
+				defer consumers.Done()
+				log.Printf("start listening for records...")
+				for rec := range records {
+					if *flagVerbose {
+						log.Printf("RECORD %+v", rec)
+					}
+					if rec.When.IsZero() {
+						continue
+					}
+					if err := db.Insert(rec); err != nil {
+						log.Printf("error inserting record: %v", err)
+						continue
+					}
 				}
-				if err := db.Insert(rec); err != nil {
-					log.Printf("error inserting record: %v", err)
-					continue
-				}
-			}
-		}()
+			}()
+		}
 	}
 
 	// log files: if a dir exists with a name eq to appName, then from under
@@ -151,28 +161,35 @@ func log2db(dbURI, appName, logDir, prefix string) {
 			f.Close()
 		}
 	}
-	for r := range filesch {
-		if appName == "server" {
-			if err = parsers.ParseServerLog(records, r, logDir, appName); err != nil {
+	for i := 0; i < concurrency; i++ {
+		producers.Add(1)
+		go func() {
+			defer producers.Done()
+			for r := range filesch {
+				if appName == "server" {
+					if err = parsers.ParseServerLog(records, r, logDir, appName); err != nil {
+						r.Close()
+						log.Fatalf("error parsing: %v", err)
+					}
+				} else {
+					if err = parsers.ParseLog(records, r, appName); err != nil {
+						r.Close()
+						log.Printf("error parsing: %v", err)
+					}
+				}
 				r.Close()
-				log.Fatalf("error parsing %q: %v", r, err)
+				if db != nil {
+					if err = db.SaveTimes(); err != nil {
+						log.Printf("error saving time: %v", err)
+					}
+				}
 			}
-		} else {
-			if err = parsers.ParseLog(records, r, appName); err != nil {
-				r.Close()
-				log.Printf("error parsing %q: %v", r, err)
-			}
-		}
-		r.Close()
-		if db != nil {
-			if err = db.SaveTimes(); err != nil {
-				log.Printf("error saving time: %v", err)
-			}
-		}
+		}()
 	}
 	if db != nil {
 		defer db.Close()
 	}
+	producers.Wait()
 	close(records)
 	consumers.Wait()
 	close(errch)

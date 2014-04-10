@@ -25,6 +25,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"unosoft.hu/log2db/record"
@@ -40,46 +41,67 @@ func init() {
 type oraStore struct {
 	*sql.DB
 	appName          string
-	n                int
+	n                int32
 	first, last, act time.Time
 	insertQry        string
-	insert           *sql.Stmt
-	tx               *sql.Tx
-	sync.Mutex
+	insert           *txStmt
+	sync.RWMutex
 }
 
-func (db *oraStore) snapshot() (*sql.Stmt, error) {
+type txStmt struct {
+	*sql.Tx
+	*sql.Stmt
+}
+
+func (db *oraStore) getStmt(commit bool) (*sql.Stmt, error) {
+	db.RLock()
+	insert := db.insert
+	db.RUnlock()
+	if insert != nil && insert.Stmt != nil {
+		if commit {
+			log.Printf("COMMIT %p", insert.Tx)
+			if err := insert.Tx.Commit(); err != nil {
+				return nil, err
+			}
+			db.Lock()
+			db.insert = nil
+			db.Unlock()
+		} else {
+			return db.insert.Stmt, nil
+		}
+	} else {
+		insert = new(txStmt)
+	}
 	var err error
-	if db.tx != nil {
-		db.tx.Commit()
-	}
-	if db.insert != nil {
-		db.insert.Close()
-	}
-	if db.tx, err = db.Begin(); err != nil {
+	if insert.Tx, err = db.DB.Begin(); err != nil {
 		return nil, fmt.Errorf("error beginning transaction: %v", err)
 	}
-	db.insert, err = db.tx.Prepare(db.insertQry)
+	insert.Stmt, err = insert.Tx.Prepare(db.insertQry)
 	if err != nil {
 		return nil, fmt.Errorf("error preparing insert: %v", err)
 	}
-	return db.insert, nil
+	db.Lock()
+	db.insert = insert
+	db.Unlock()
+	return insert.Stmt, nil
 }
 
 func (db *oraStore) Close() error {
 	db.Lock()
 	defer db.Unlock()
 	var commitErr error
-	if db.tx != nil {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("panic with Commit(): %v", r)
-				}
+	if db.insert != nil {
+		if db.insert.Tx != nil {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("panic with Commit(): %v", r)
+					}
+				}()
+				commitErr = db.insert.Tx.Commit()
 			}()
-			commitErr = db.tx.Commit()
-			db.tx = nil
-		}()
+		}
+		db.insert = nil
 	}
 	log.Println("transaction")
 	if err := db.SaveTimes(); err != nil {
@@ -127,25 +149,29 @@ func (db *oraStore) Insert(rec record.Record) error {
 	if db.act.Before(rec.When) {
 		db.act = rec.When
 	}
-	if db.insert == nil || db.n%1000 == 0 {
-		if _, err := db.snapshot(); err != nil {
-			return err
-		}
+	insert, err := db.getStmt(atomic.LoadInt32(&db.n)%1000 == 999)
+	if err != nil {
+		return err
 	}
 	bg := "N"
 	if rec.Background {
 		bg = "I"
 	}
-	if _, err := db.insert.Exec(rec.App, rec.Type, rec.When, rec.SessionID,
+	when := rec.When.Round(time.Millisecond)
+	log.Printf("len(rec.Text)=%d when=%s", len(rec.Text), when)
+	if _, err := insert.Exec(rec.App, rec.Type, when, rec.SessionID,
 		rec.Text, rec.EventID, rec.Command, bg, rec.RC,
 		base64.StdEncoding.EncodeToString(rec.ID()),
 	); err != nil {
-		if strings.Index(err.Error(), "ORA-00001:") < 0 {
-			return err
+		if strings.Index(err.Error(), "ORA-00001:") >= 0 {
+			skippedNum.Add(1)
+			return nil
+		} else if strings.Index(err.Error(), "ORA-01438:") >= 0 {
+			log.Printf("error inserting %#v", rec)
 		}
-		skippedNum.Add(1)
-		return nil
+		return err
 	}
+	atomic.AddInt32(&db.n, 1)
 	insertedNum.Add(1)
 	return nil
 }

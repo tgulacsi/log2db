@@ -27,6 +27,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"unosoft.hu/log2db/record"
@@ -104,22 +105,28 @@ func (p *parser) Scan(rec *record.Record) error {
 			debug("cannot parse time from %q: %v", line, err)
 		} else { // new record's beginning
 			if p.buf.Len() > 0 {
-				rec.App = p.appName
-				rec.When = p.lastTime
-				rec.Type = p.lastRT
-				rec.SessionID = p.lastSID
-				rec.Text = p.buf.String()
-				p.buf.Reset()
-				return nil
+				if p.lastTime.IsZero() {
+					p.buf.Reset()
+				} else {
+					rec.App = p.appName
+					rec.When = p.lastTime
+					rec.Type = p.lastRT
+					rec.SessionID = p.lastSID
+					rec.Text = p.buf.String()
+					p.buf.Reset()
+					return nil
+				}
 			}
 			p.lastTime, p.lastRT, p.lastSID = p.actTime, p.actRT, p.actSID
 			p.buf.Write(rest)
 			p.buf.WriteByte('\n')
 			continue
 		}
-		// append to the end
-		p.buf.Write(line)
-		p.buf.WriteByte('\n')
+		if !p.lastTime.IsZero() {
+			// append to the end
+			p.buf.Write(line)
+			p.buf.WriteByte('\n')
+		}
 		// and scan the next line
 	}
 	if err == nil {
@@ -152,7 +159,6 @@ func parseTime(tim *time.Time, line []byte) ([]byte, record.RecordType, int64, e
 	if i < 0 {
 		return line, rt, 0, ErrUnfinished
 	}
-	var j int
 	if i >= 19 { // 2006-01-02T15:04:05.00000
 		if len(line) > i+20 && line[i+1] == '2' { // another time
 			if *tim, err = time.Parse("2006-01-02 15:04:05", string(line[i+1:i+1+19])); err == nil {
@@ -160,23 +166,22 @@ func parseTime(tim *time.Time, line []byte) ([]byte, record.RecordType, int64, e
 			}
 		}
 		line[10] = ' '
-		j = i
-		i = 10
 	} else {
-		j = bytes.IndexByte(line[i+1:], ' ')
+		j := bytes.IndexByte(line[i+1:], ' ')
 		if j < 0 {
 			return line, rt, 0, ErrUnfinished
 		}
+		i += 1 + j
 	}
-	i += 1 + j
-	if i >= 23 {
+	if i > 19 {
 		if line[19] == ',' {
 			line[19] = '.'
 		}
-		*tim, err = time.Parse("2006-01-02 15:04:05.000", string(line[:23]))
+		*tim, err = time.Parse("2006-01-02 15:04:05."+strings.Repeat("0", i-20), string(line[:i]))
 	} else {
 		*tim, err = time.Parse("2006-01-02 15:04:05", string(line[:19]))
 	}
+	//log.Printf("i=%d line=%q line19=%c, line:23=%q => %s %v", i, line[:i], line[19], line[:23], *tim, err)
 	if err != nil {
 		return line, rt, 0, fmt.Errorf("error parsing %q as time: %v", line[:i], err)
 	}
