@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -44,66 +43,67 @@ type oraStore struct {
 	n                int32
 	first, last, act time.Time
 	insertQry        string
-	insert           *txStmt
-	sync.RWMutex
+	txPool           chan txStmt
 }
 
 type txStmt struct {
 	*sql.Tx
 	*sql.Stmt
+	n int32
 }
 
-func (db *oraStore) getStmt(commit bool) (*sql.Stmt, error) {
-	db.RLock()
-	insert := db.insert
-	db.RUnlock()
-	if insert != nil && insert.Stmt != nil {
+func (db *oraStore) getStmt() (stmt *sql.Stmt, release func(bool) error, err error) {
+	var insert txStmt
+	select {
+	case insert = <-db.txPool:
+	default:
+		if insert.Tx, err = db.DB.Begin(); err != nil {
+			return nil, nil, fmt.Errorf("error beginning transaction: %v", err)
+		}
+		insert.Stmt, err = insert.Tx.Prepare(db.insertQry)
+		if err != nil {
+			return nil, nil, fmt.Errorf("error preparing insert: %v", err)
+		}
+	}
+	return insert.Stmt, func(commit bool) error {
 		if commit {
 			log.Printf("COMMIT %p", insert.Tx)
 			if err := insert.Tx.Commit(); err != nil {
-				return nil, err
+				return err
 			}
-			db.Lock()
-			db.insert = nil
-			db.Unlock()
-		} else {
-			return db.insert.Stmt, nil
+			return nil
 		}
-	} else {
-		insert = new(txStmt)
-	}
-	var err error
-	if insert.Tx, err = db.DB.Begin(); err != nil {
-		return nil, fmt.Errorf("error beginning transaction: %v", err)
-	}
-	insert.Stmt, err = insert.Tx.Prepare(db.insertQry)
-	if err != nil {
-		return nil, fmt.Errorf("error preparing insert: %v", err)
-	}
-	db.Lock()
-	db.insert = insert
-	db.Unlock()
-	return insert.Stmt, nil
+		select {
+		case db.txPool <- insert:
+		default:
+		}
+		return nil
+	}, nil
 }
 
 func (db *oraStore) Close() error {
-	db.Lock()
-	defer db.Unlock()
-	var commitErr error
-	if db.insert != nil {
-		if db.insert.Tx != nil {
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						log.Printf("panic with Commit(): %v", r)
-					}
+	var (
+		commitErr error
+		insert    txStmt
+	)
+Loop:
+	for {
+		select {
+		case insert = <-db.txPool:
+			if insert.Tx != nil {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("panic with Commit(): %v", r)
+						}
+					}()
+					commitErr = insert.Tx.Commit()
 				}()
-				commitErr = db.insert.Tx.Commit()
-			}()
+			}
+		default:
+			break Loop
 		}
-		db.insert = nil
 	}
-	log.Println("transaction")
 	if err := db.SaveTimes(); err != nil {
 		log.Printf("error saving time: %v", err)
 	}
@@ -149,7 +149,7 @@ func (db *oraStore) Insert(rec record.Record) error {
 	if db.act.Before(rec.When) {
 		db.act = rec.When
 	}
-	insert, err := db.getStmt(atomic.LoadInt32(&db.n)%1000 == 999)
+	insert, release, err := db.getStmt()
 	if err != nil {
 		return err
 	}
@@ -158,11 +158,12 @@ func (db *oraStore) Insert(rec record.Record) error {
 		bg = "I"
 	}
 	when := rec.When.Round(time.Millisecond)
-	log.Printf("len(rec.Text)=%d when=%s", len(rec.Text), when)
+	id := base64.StdEncoding.EncodeToString(rec.ID())
+	log.Printf("len(rec.Text)=%d when=%s len(rec.ID)=%d", len(rec.Text), when, len(id))
 	if _, err := insert.Exec(rec.App, rec.Type, when, rec.SessionID,
-		rec.Text, rec.EventID, rec.Command, bg, rec.RC,
-		base64.StdEncoding.EncodeToString(rec.ID()),
+		rec.Text, rec.EventID, rec.Command, bg, rec.RC, id,
 	); err != nil {
+		release(false)
 		if strings.Index(err.Error(), "ORA-00001:") >= 0 {
 			skippedNum.Add(1)
 			return nil
@@ -171,9 +172,8 @@ func (db *oraStore) Insert(rec record.Record) error {
 		}
 		return err
 	}
-	atomic.AddInt32(&db.n, 1)
 	insertedNum.Add(1)
-	return nil
+	return release(atomic.AddInt32(&db.n, 1)%1000 == 0)
 }
 
 func (db *oraStore) Search(after, before time.Time) (Enumerator, error) {
@@ -200,7 +200,10 @@ func (rs oraRows) Scan(rec *record.Record) error {
 	return nil
 }
 
-func openOraStore(params, appName string) (Store, error) {
+func openOraStore(params, appName string, concurrency int) (Store, error) {
+	if concurrency < 1 {
+		concurrency = 1
+	}
 	var firstTime, lastTime time.Time
 	db, err := sql.Open("gocilib", params)
 	if err != nil {
@@ -272,6 +275,7 @@ func openOraStore(params, appName string) (Store, error) {
 		first:   firstTime,
 		last:    lastTime,
 		appName: appName,
+		txPool:  make(chan txStmt, concurrency),
 		insertQry: `
 INSERT INTO W_GT_log (F_app, F_type, F_date, F_sid, F_text, F_evid, F_cmd, F_bg, F_rc, F_id)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,

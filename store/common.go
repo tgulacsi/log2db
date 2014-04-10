@@ -37,7 +37,7 @@ type Enumerator interface {
 }
 
 var (
-	OpenOraStore = func(params, appName string) (Store, error) { return nil, errors.New("not implemented") }
+	OpenOraStore = func(params, appName string, concurrency int) (Store, error) { return nil, errors.New("not implemented") }
 	OpenQlStore  = func(params, appName string) (Store, error) { return nil, errors.New("not implemented") }
 )
 
