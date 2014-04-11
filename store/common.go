@@ -42,12 +42,12 @@ type Enumerator interface {
 
 var (
 	OpenOraStore = func(params, appName string, concurrency int) (Store, error) {
-		return nil, errors.New("not implemented")
+		return nil, errors.New("ora store is not implemented")
 	}
 	OpenPgStore = func(params, appName string, concurrency int) (Store, error) {
-		return nil, errors.New("not implemented")
+		return nil, errors.New("pg store not implemented")
 	}
-	OpenQlStore = func(params, appName string) (Store, error) { return nil, errors.New("not implemented") }
+	OpenQlStore = func(params, appName string) (Store, error) { return nil, errors.New("ql store is not implemented") }
 )
 
 var (
