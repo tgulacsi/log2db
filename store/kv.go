@@ -27,6 +27,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"runtime"
 	"time"
 
 	"unosoft.hu/log2db/record"
@@ -305,8 +306,8 @@ func (en *kvEnum) Next() bool {
 	var key []byte
 	for {
 		key, en.last, en.err = en.Enumerator.Next()
-		log.Printf("key=%x err=%v", key, en.err)
 		if en.err != nil {
+			log.Printf("key=%x err=%v", key, en.err)
 			return false
 		}
 		if len(key) == 0 {
@@ -327,6 +328,7 @@ func (en *kvEnum) Next() bool {
 }
 
 func (en *kvEnum) Scan(rec *record.Record) error {
+	defer runtime.GC()
 	if en.err != nil {
 		return en.err
 	}

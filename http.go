@@ -21,6 +21,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"strconv"
 	"time"
 
@@ -88,6 +89,11 @@ func (p pager) mainPage(w http.ResponseWriter, r *http.Request) {
 	enum, err := p.Search(after, before)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
+		return
+	}
+	if enum == nil {
+		http.Error(w, "Something blocked the search from returning items, sorry.", 500)
+		return
 	}
 	defer enum.Close()
 	flush := func() {}

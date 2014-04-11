@@ -99,7 +99,7 @@ func log2db(dbURI, appName, logDir, prefix, charset string) {
 	if charset != "" {
 		charset = strings.ToLower(strings.TrimSpace(charset))
 		if charset != "" && charset != "utf-8" && charset != "utf8" {
-			if enc = text.GetEncoding(charset); enc != nil {
+			if enc = text.GetEncoding(charset); enc == nil {
 				log.Fatalf("unknown charset %q", charset)
 			}
 		}
@@ -252,10 +252,7 @@ func readFiles(errch chan<- error, logDir, prefix string, enc encoding.Encoding)
 			return struct {
 				io.Reader
 				io.Closer
-			}{
-				transform.NewReader(r, enc.NewDecoder()),
-				r,
-			}
+			}{transform.NewReader(r, enc.NewDecoder()), r}
 		}
 	}
 
