@@ -34,6 +34,10 @@ import (
 	"unosoft.hu/log2db/parsers"
 	"unosoft.hu/log2db/record"
 	"unosoft.hu/log2db/store"
+
+	"code.google.com/p/go.text/encoding"
+	"code.google.com/p/go.text/transform"
+	"github.com/tgulacsi/go/text"
 )
 
 var (
@@ -71,12 +75,13 @@ func main() {
 	case "log2db":
 		flagFilePrefix := flag.String("prefix", "", "filename's prefix - defaults to the app, if not given")
 		flagDB := flag.String("db", "kv://log2db.kvdb", "destination DB URL")
+		flagCharset := flag.String("charset", "utf-8", "source file charset")
 		flag.Parse()
 		parsers.Debug = *flagDebug
 		if flag.NArg() < 2 {
 			flag.Usage()
 		}
-		log2db(*flagDB, flag.Arg(0), flag.Arg(1), *flagFilePrefix)
+		log2db(*flagDB, flag.Arg(0), flag.Arg(1), *flagFilePrefix, *flagCharset)
 	case "pull":
 		flagIdentity := flag.String("i", "$HOME/.ssh/id_rsa", "ssh identity file")
 		flagLogdir := flag.String("d", "kobed/bruno/data/mai/log", "remote log directory")
@@ -89,7 +94,17 @@ func main() {
 
 }
 
-func log2db(dbURI, appName, logDir, prefix string) {
+func log2db(dbURI, appName, logDir, prefix, charset string) {
+	var enc encoding.Encoding
+	if charset != "" {
+		charset = strings.ToLower(strings.TrimSpace(charset))
+		if charset != "" && charset != "utf-8" && charset != "utf8" {
+			if enc = text.GetEncoding(charset); enc != nil {
+				log.Fatalf("unknown charset %q", charset)
+			}
+		}
+	}
+
 	if prefix == "" {
 		prefix = appName
 	}
@@ -148,7 +163,7 @@ func log2db(dbURI, appName, logDir, prefix string) {
 		}
 	}()
 	log.Printf("reading files of %s from %s", prefix, logDir)
-	filesch := readFiles(errch, logDir, prefix)
+	filesch := readFiles(errch, logDir, prefix, enc)
 
 	if *flagMemprofile != "" {
 		for _ = range time.Tick(10 * time.Second) {
@@ -226,8 +241,23 @@ func openDbURI(appName, dbURI string) (db store.Store, err error) {
 	return
 }
 
-func readFiles(errch chan<- error, logDir, prefix string) <-chan io.ReadCloser {
+func readFiles(errch chan<- error, logDir, prefix string, enc encoding.Encoding) <-chan io.ReadCloser {
 	filesch := make(chan io.ReadCloser, 2)
+
+	makeDecodingReader := func(r io.ReadCloser) io.ReadCloser {
+		return r
+	}
+	if enc != nil {
+		makeDecodingReader = func(r io.ReadCloser) io.ReadCloser {
+			return struct {
+				io.Reader
+				io.Closer
+			}{
+				transform.NewReader(r, enc.NewDecoder()),
+				r,
+			}
+		}
+	}
 
 	go func() {
 		defer close(filesch)
@@ -264,7 +294,7 @@ func readFiles(errch chan<- error, logDir, prefix string) <-chan io.ReadCloser {
 				errch <- err
 				return
 			}
-			filesch <- r
+			filesch <- makeDecodingReader(r)
 		}
 	}()
 	return filesch
