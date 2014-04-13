@@ -17,11 +17,13 @@ limitations under the License.
 package main
 
 import (
+	"errors"
 	"expvar"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -76,20 +78,15 @@ func main() {
 		flagDB := flag.String("db", "kv://log2db.kvdb", "destination DB URL")
 		flagCharset := flag.String("charset", "utf-8", "source file charset")
 		flagLocation := flag.String("location", "Europe/Budapest", "timezone location (for non-zoned record times)")
+		flagShuffle := flag.Bool("shuffle", false, "shuffle the record Text (only for tests)")
 		flag.Parse()
 		parsers.Debug = *flagDebug
 		if flag.NArg() < 2 {
 			flag.Usage()
 		}
-		var loc *time.Location
-		if *flagLocation != "" {
-			var err error
-			loc, err = time.LoadLocation(*flagLocation)
-			if err != nil {
-				log.Fatalf("unknown location %q: %v", *flagLocation, err)
-			}
+		if err := log2db(*flagDB, flag.Arg(0), flag.Arg(1), *flagFilePrefix, *flagCharset, *flagLocation, *flagShuffle); err != nil {
+			log.Fatal(err)
 		}
-		log2db(*flagDB, flag.Arg(0), flag.Arg(1), *flagFilePrefix, *flagCharset, loc)
 	case "pull":
 		flagIdentity := flag.String("i", "$HOME/.ssh/id_rsa", "ssh identity file")
 		flagLogdir := flag.String("d", "kobed/bruno/data/mai/log", "remote log directory")
@@ -102,13 +99,21 @@ func main() {
 
 }
 
-func log2db(dbURI, appName, logDir, prefix, charset string, loc *time.Location) {
+func log2db(dbURI, appName, logDir, prefix, charset, locName string, shuffle bool) error {
+	var loc *time.Location
+	if locName != "" {
+		var err error
+		loc, err = time.LoadLocation(locName)
+		if err != nil {
+			return fmt.Errorf("unknown location %q: %v", locName, err)
+		}
+	}
 	var enc encoding.Encoding
 	if charset != "" {
 		charset = strings.ToLower(strings.TrimSpace(charset))
 		if charset != "" && charset != "utf-8" && charset != "utf8" {
 			if enc = text.GetEncoding(charset); enc == nil {
-				log.Fatalf("unknown charset %q", charset)
+				return fmt.Errorf("unknown charset %q", charset)
 			}
 		}
 	}
@@ -120,14 +125,14 @@ func log2db(dbURI, appName, logDir, prefix, charset string, loc *time.Location) 
 
 	db, err := openDbURI(appName, dbURI)
 	if err != nil {
-		log.Fatalf("error opening %q: %v", dbURI, err)
+		return fmt.Errorf("error opening %q: %v", dbURI, err)
 	}
 	log.Printf("db=%+v", db)
 	records := make(chan record.Record, 8*concurrency)
 	consumers.Add(1)
 	if db == nil {
 		if dbURI != "" {
-			log.Fatalf("%q => nil DB!", dbURI)
+			return fmt.Errorf("%q => nil DB!", dbURI)
 		}
 		go func() {
 			defer consumers.Done()
@@ -154,6 +159,9 @@ func log2db(dbURI, appName, logDir, prefix, charset string, loc *time.Location) 
 					if rec.When.IsZero() {
 						continue
 					}
+					if shuffle {
+						rec.Text = shuffleString(rec.Text)
+					}
 					if err := db.Insert(rec); err != nil {
 						log.Printf("error inserting record: %v", err)
 						continue
@@ -164,10 +172,13 @@ func log2db(dbURI, appName, logDir, prefix, charset string, loc *time.Location) 
 	}
 
 	// log files: if a dir exists with a name eq to appName, then from under
+	errs := make([]string, 0, 1)
 	errch := make(chan error, 1)
 	go func() {
 		for err := range errch {
-			log.Fatalf("ERROR %v", err)
+			e := fmt.Sprintf("ERROR %v", err)
+			log.Println(e)
+			errs = append(errs, e)
 		}
 	}()
 	log.Printf("reading files of %s from %s", prefix, logDir)
@@ -178,7 +189,7 @@ func log2db(dbURI, appName, logDir, prefix, charset string, loc *time.Location) 
 			// stop after one round
 			f, err := os.Create(*flagMemprofile)
 			if err != nil {
-				log.Fatal(err)
+				return err
 			}
 			pprof.WriteHeapProfile(f)
 			f.Close()
@@ -192,7 +203,8 @@ func log2db(dbURI, appName, logDir, prefix, charset string, loc *time.Location) 
 				if appName == "server" {
 					if err = parsers.ParseServerLog(records, r, logDir, appName, loc); err != nil {
 						r.Close()
-						log.Fatalf("error parsing: %v", err)
+						errch <- fmt.Errorf("error parsing: %v", err)
+						return
 					}
 				} else {
 					if err = parsers.ParseLog(records, r, appName, loc); err != nil {
@@ -218,6 +230,10 @@ func log2db(dbURI, appName, logDir, prefix, charset string, loc *time.Location) 
 	close(errch)
 
 	log.Printf("skipped %s, inserted %s records.", expvar.Get("storeSkipped"), expvar.Get("storeInserted"))
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "\n"))
+	}
+	return nil
 }
 
 func openDbURI(appName, dbURI string) (db store.Store, err error) {
@@ -237,13 +253,13 @@ func openDbURI(appName, dbURI string) (db store.Store, err error) {
 		case "pg":
 			db, err = store.OpenPgStore(params, appName, concurrency)
 		default:
-			log.Fatalf("unkown db: %s", dbURI)
+			return nil, fmt.Errorf("unkown db: %s", dbURI)
 		}
 		if err != nil {
 			return nil, err
 		}
 		if db == nil {
-			log.Fatalf("NIL db of %q", dbURI)
+			return nil, fmt.Errorf("NIL db of %q", dbURI)
 		}
 	}
 	return
@@ -320,6 +336,23 @@ func fnAppPrefix(prefix, fn string) bool {
 		return false
 	}
 	return true
+}
+
+func shuffleString(txt string) string {
+	return string(shuffleBytes([]byte(txt)))
+}
+
+func shuffleBytes(b []byte) []byte {
+	switch len(b) {
+	case 0, 1:
+		return b
+	}
+	m := len(b) % 2
+	h := (len(b) - m) / 2
+	for i, j := range rand.Perm(h) {
+		b[m+i], b[m+h+j] = b[m+h+j], b[m+i]
+	}
+	return b
 }
 
 type byMTime []os.FileInfo
