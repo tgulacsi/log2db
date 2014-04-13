@@ -27,7 +27,6 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
-	"runtime"
 	"time"
 
 	"unosoft.hu/log2db/record"
@@ -200,42 +199,13 @@ func (db *kvStore) Insert(rec record.Record) error {
 				skippedNum.Add(1)
 				return nil, false, nil // leave it as were
 			}
-			var e error
-			var w io.WriteCloser
-			b := marshalPool.Acquire(512)[:0]
-			defer func() { marshalPool.Release(b) }()
-
-			cb := bytes.NewBuffer(b)
-			if len(rec.Text) < compressionThreshold {
-				w = struct {
-					io.Writer
-					io.Closer
-				}{cb, ioutil.NopCloser(nil)}
-			} else {
-				w, e = flate.NewWriter(cb, flate.BestCompression)
-				if e != nil {
-					e = fmt.Errorf("error creating compressor: %v", e)
-					log.Println(e.Error())
-					return nil, false, e
+			v, e := encodeRec(nil, rec)
+			if e != nil {
+				if e == errTooLong {
+					tooLong = v
 				}
-			}
-
-			if e = json.NewEncoder(w).Encode(rec); e != nil {
-				log.Printf("error marshaling %+v: %v", rec, e)
 				return nil, false, e
 			}
-			if e = w.Close(); e != nil {
-				e = fmt.Errorf("error writing to compressor: %v", e)
-				log.Println(e.Error())
-				return nil, false, e
-			}
-			if cb.Len() > maxKVLength {
-				log.Printf("TOO LONG (%d, max %d)", cb.Len(), maxKVLength)
-				tooLong = cb.Bytes()
-				return nil, false, errTooLong
-			}
-			v = cb.Bytes()
-
 			insertedNum.Add(1)
 			return v, true, nil // set
 		})
@@ -303,10 +273,16 @@ type kvEnum struct {
 var enumPool = NewBytesPool(16)
 
 func (en *kvEnum) Next() bool {
+	if en.err != nil {
+		return false
+	}
 	var key []byte
 	for {
 		key, en.last, en.err = en.Enumerator.Next()
 		if en.err != nil {
+			if en.err == io.EOF {
+				return false
+			}
 			log.Printf("key=%x err=%v", key, en.err)
 			return false
 		}
@@ -328,7 +304,6 @@ func (en *kvEnum) Next() bool {
 }
 
 func (en *kvEnum) Scan(rec *record.Record) error {
-	defer runtime.GC()
 	if en.err != nil {
 		return en.err
 	}
@@ -344,6 +319,10 @@ func (en *kvEnum) Scan(rec *record.Record) error {
 		// compressed
 		return json.NewDecoder(flate.NewReader(bytes.NewReader(en.last[1:]))).Decode(rec)
 	}
+	if en.last[0] != 1 {
+		return fmt.Errorf("unknown byte head %d (should be 1)", en.last[0])
+	}
+
 	// list of compressed chunks
 	var (
 		err    error
@@ -353,16 +332,22 @@ func (en *kvEnum) Scan(rec *record.Record) error {
 	)
 	log.Printf("reading from %d chunks", n)
 	tLen := 0
+	addresses := en.last[1:]
 	for i := 0; i < n; i++ {
-		key = en.last[1+i*chunkAddrLength : 1+(i+1)*chunkAddrLength]
-		log.Printf("retrieving %x", key[1:])
-		val := enumPool.Acquire(maxKVLength)[:0]
+		key = addresses[i*chunkAddrLength : (i+1)*chunkAddrLength]
+		log.Printf("retrieving %c%x", key[0], key[1:])
+		val := enumPool.Acquire(maxKVLength)
+		copy(val[:10], []byte("UNWRITTEN"))
 		if val, err = en.DB.Get(val, key); err != nil {
 			log.Printf("error retrieving chunk %q: %v", key, err)
 			return err
 		}
-		if len(val) == 0 {
-			log.Printf("%x is zero length?", key[1:])
+		if val == nil {
+			log.Printf("%c%x is nil!", key[0], key[1:])
+			continue
+		} else if len(val) == 0 {
+			log.Printf("%s%x is zero length? (val=%q %d %d)",
+				key[0], key[1:], val, len(val), cap(val))
 			continue
 		}
 		chunks = append(chunks, bytes.NewReader(val))
@@ -420,6 +405,41 @@ func (db *kvStore) SaveTimes() error {
 		}
 	}
 	return nil
+}
+
+func encodeRec(b []byte, rec record.Record) ([]byte, error) {
+	var e error
+	var w io.WriteCloser
+
+	cb := bytes.NewBuffer(b)
+	if len(rec.Text) < compressionThreshold {
+		w = struct {
+			io.Writer
+			io.Closer
+		}{cb, ioutil.NopCloser(nil)}
+	} else {
+		w, e = flate.NewWriter(cb, flate.BestCompression)
+		if e != nil {
+			e = fmt.Errorf("error creating compressor: %v", e)
+			log.Println(e.Error())
+			return nil, e
+		}
+	}
+
+	if e = json.NewEncoder(w).Encode(rec); e != nil {
+		log.Printf("error marshaling %+v: %v", rec, e)
+		return nil, e
+	}
+	if e = w.Close(); e != nil {
+		e = fmt.Errorf("error writing to compressor: %v", e)
+		log.Println(e.Error())
+		return nil, e
+	}
+	if cb.Len() > maxKVLength {
+		log.Printf("TOO LONG (%d, max %d)", cb.Len(), maxKVLength)
+		return cb.Bytes(), errTooLong
+	}
+	return cb.Bytes(), nil
 }
 
 func minInt(a, b int) int {

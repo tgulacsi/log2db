@@ -70,7 +70,7 @@ func (p bytesPool) Acquire(n int) []byte {
 		select {
 		case b := <-p.ch:
 			if cap(b) >= n {
-				return b[:n]
+				return b
 			}
 		default:
 			return make([]byte, n)
@@ -80,7 +80,7 @@ func (p bytesPool) Acquire(n int) []byte {
 
 func (p bytesPool) Release(b []byte) {
 	select {
-	case p.ch <- b:
+	case p.ch <- b[:0]:
 	default:
 	}
 }

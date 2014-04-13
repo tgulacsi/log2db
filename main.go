@@ -36,7 +36,6 @@ import (
 	"unosoft.hu/log2db/store"
 
 	"code.google.com/p/go.text/encoding"
-	"code.google.com/p/go.text/transform"
 	"github.com/tgulacsi/go/text"
 )
 
@@ -245,14 +244,17 @@ func readFiles(errch chan<- error, logDir, prefix string, enc encoding.Encoding)
 	filesch := make(chan io.ReadCloser, 2)
 
 	makeDecodingReader := func(r io.ReadCloser) io.ReadCloser {
-		return r
+		return struct {
+			io.Reader
+			io.Closer
+		}{text.NewReplacementReader(r), r}
 	}
 	if enc != nil {
 		makeDecodingReader = func(r io.ReadCloser) io.ReadCloser {
 			return struct {
 				io.Reader
 				io.Closer
-			}{transform.NewReader(r, enc.NewDecoder()), r}
+			}{text.NewDecodingReader(r, enc), r}
 		}
 	}
 
