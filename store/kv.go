@@ -202,7 +202,7 @@ func (db *kvStore) Insert(rec record.Record) error {
 			v, e := encodeRec(nil, rec)
 			if e != nil {
 				if e == errTooLong {
-					tooLong = v
+					tooLong = v[1:] // the first byte is 0
 				}
 				return nil, false, e
 			}
@@ -418,6 +418,7 @@ func encodeRec(b []byte, rec record.Record) ([]byte, error) {
 			io.Closer
 		}{cb, ioutil.NopCloser(nil)}
 	} else {
+		cb.WriteByte(0)
 		w, e = flate.NewWriter(cb, flate.BestCompression)
 		if e != nil {
 			e = fmt.Errorf("error creating compressor: %v", e)

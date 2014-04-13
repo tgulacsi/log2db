@@ -18,6 +18,7 @@ package store
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -46,7 +47,7 @@ func TestKvStore(t *testing.T) {
 		"short text",
 		strings.Repeat("A", maxKVLength),
 		strings.Repeat("B", maxKVLength+1),
-		strings.Repeat("C", 10) + strings.Repeat(string(rnd), 10),
+		strings.Repeat("C", 10) + strings.Repeat(base64.StdEncoding.EncodeToString(rnd), 10),
 	} {
 		tim := time.Now().Add(-time.Duration(i) * time.Second)
 		rec := record.Record{When: tim, Text: txt}
