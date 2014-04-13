@@ -75,12 +75,21 @@ func main() {
 		flagFilePrefix := flag.String("prefix", "", "filename's prefix - defaults to the app, if not given")
 		flagDB := flag.String("db", "kv://log2db.kvdb", "destination DB URL")
 		flagCharset := flag.String("charset", "utf-8", "source file charset")
+		flagLocation := flag.String("location", "Europe/Budapest", "timezone location (for non-zoned record times)")
 		flag.Parse()
 		parsers.Debug = *flagDebug
 		if flag.NArg() < 2 {
 			flag.Usage()
 		}
-		log2db(*flagDB, flag.Arg(0), flag.Arg(1), *flagFilePrefix, *flagCharset)
+		var loc *time.Location
+		if *flagLocation != "" {
+			var err error
+			loc, err = time.LoadLocation(*flagLocation)
+			if err != nil {
+				log.Fatalf("unknown location %q: %v", *flagLocation, err)
+			}
+		}
+		log2db(*flagDB, flag.Arg(0), flag.Arg(1), *flagFilePrefix, *flagCharset, loc)
 	case "pull":
 		flagIdentity := flag.String("i", "$HOME/.ssh/id_rsa", "ssh identity file")
 		flagLogdir := flag.String("d", "kobed/bruno/data/mai/log", "remote log directory")
@@ -93,7 +102,7 @@ func main() {
 
 }
 
-func log2db(dbURI, appName, logDir, prefix, charset string) {
+func log2db(dbURI, appName, logDir, prefix, charset string, loc *time.Location) {
 	var enc encoding.Encoding
 	if charset != "" {
 		charset = strings.ToLower(strings.TrimSpace(charset))
@@ -181,12 +190,12 @@ func log2db(dbURI, appName, logDir, prefix, charset string) {
 			defer producers.Done()
 			for r := range filesch {
 				if appName == "server" {
-					if err = parsers.ParseServerLog(records, r, logDir, appName); err != nil {
+					if err = parsers.ParseServerLog(records, r, logDir, appName, loc); err != nil {
 						r.Close()
 						log.Fatalf("error parsing: %v", err)
 					}
 				} else {
-					if err = parsers.ParseLog(records, r, appName); err != nil {
+					if err = parsers.ParseLog(records, r, appName, loc); err != nil {
 						r.Close()
 						log.Printf("error parsing: %v", err)
 					}

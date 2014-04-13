@@ -52,6 +52,7 @@ type parser struct {
 	actRT, lastRT     record.RecordType
 	actSID, lastSID   int64
 	appName           string
+	loc               *time.Location
 }
 
 type Parser interface {
@@ -61,8 +62,8 @@ type Parser interface {
 
 // ParseLog parses a server.log from the reader,
 // returning the Records into the dest channel.
-func ParseLog(dest chan<- record.Record, r io.Reader, appName string) error {
-	scn := NewBasicParser(r, appName)
+func ParseLog(dest chan<- record.Record, r io.Reader, appName string, loc *time.Location) error {
+	scn := NewBasicParser(r, appName, loc)
 	for {
 		var rec record.Record
 		err := scn.Scan(&rec)
@@ -78,10 +79,10 @@ func ParseLog(dest chan<- record.Record, r io.Reader, appName string) error {
 }
 
 // NewBasicParser creates a new basic parser
-func NewBasicParser(r io.Reader, appName string) Parser {
+func NewBasicParser(r io.Reader, appName string, loc *time.Location) Parser {
 	p := &parser{scn: bufio.NewScanner(bufio.NewReader(r)),
 		buf:     bytes.NewBuffer(make([]byte, 0, 1024)),
-		appName: appName}
+		appName: appName, loc: loc}
 	p.scn.Split(bufio.ScanLines)
 	return p
 }
@@ -100,7 +101,7 @@ func (p *parser) Scan(rec *record.Record) error {
 			p.buf.WriteByte('\n')
 			continue
 		}
-		rest, p.actRT, p.actSID, err = parseTime(&p.actTime, line)
+		rest, p.actRT, p.actSID, err = parseTime(&p.actTime, line, p.loc)
 		if err != nil {
 			debug("cannot parse time from %q: %v", line, err)
 		} else { // new record's beginning
@@ -145,10 +146,12 @@ func (p *parser) Scan(rec *record.Record) error {
 	return io.EOF
 }
 
-func parseTime(tim *time.Time, line []byte) ([]byte, record.RecordType, int64, error) {
+func parseTime(tim *time.Time, line []byte, loc *time.Location) (
+	[]byte, record.RecordType, int64, error,
+) {
 	var err error
 	if bytes.HasPrefix(line, []byte("SYSLOG [")) || bytes.HasPrefix(line, []byte("DIR [")) || bytes.HasPrefix(line, []byte("SHELL [")) {
-		return parseServerlogTime(tim, line)
+		return parseServerlogTime(tim, line, loc)
 	}
 	rt := record.RecordType(record.RtUnknown)
 	if line[0] != '2' {
@@ -159,9 +162,15 @@ func parseTime(tim *time.Time, line []byte) ([]byte, record.RecordType, int64, e
 	if i < 0 {
 		return line, rt, 0, ErrUnfinished
 	}
+	timeParse := time.Parse
+	if loc != nil {
+		timeParse = func(layout, value string) (time.Time, error) {
+			return time.ParseInLocation(layout, value, loc)
+		}
+	}
 	if i >= 19 { // 2006-01-02T15:04:05.00000
 		if len(line) > i+20 && line[i+1] == '2' { // another time
-			if *tim, err = time.Parse("2006-01-02 15:04:05", string(line[i+1:i+1+19])); err == nil {
+			if *tim, err = timeParse("2006-01-02 15:04:05", string(line[i+1:i+1+19])); err == nil {
 				return line[i+1+20:], rt, 0, nil
 			}
 		}
@@ -177,9 +186,9 @@ func parseTime(tim *time.Time, line []byte) ([]byte, record.RecordType, int64, e
 		if line[19] == ',' {
 			line[19] = '.'
 		}
-		*tim, err = time.Parse("2006-01-02 15:04:05."+strings.Repeat("0", i-20), string(line[:i]))
+		*tim, err = timeParse("2006-01-02 15:04:05."+strings.Repeat("0", i-20), string(line[:i]))
 	} else {
-		*tim, err = time.Parse("2006-01-02 15:04:05", string(line[:19]))
+		*tim, err = timeParse("2006-01-02 15:04:05", string(line[:19]))
 	}
 	//log.Printf("i=%d line=%q line19=%c, line:23=%q => %s %v", i, line[:i], line[19], line[:23], *tim, err)
 	if err != nil {
@@ -191,7 +200,9 @@ func parseTime(tim *time.Time, line []byte) ([]byte, record.RecordType, int64, e
 	return line[i+1:], rt, 0, nil
 }
 
-func parseServerlogTime(tim *time.Time, line []byte) ([]byte, record.RecordType, int64, error) {
+func parseServerlogTime(tim *time.Time, line []byte, loc *time.Location) (
+	[]byte, record.RecordType, int64, error,
+) {
 	i := bytes.IndexByte(line, '[')
 	rt, sid := record.RecordType(record.RtUnknown), int64(0)
 	switch string(line[:i-1]) {
@@ -209,8 +220,14 @@ func parseServerlogTime(tim *time.Time, line []byte) ([]byte, record.RecordType,
 	if i < 0 {
 		return line, rt, sid, fmt.Errorf("cannot find ']: (' in line %q", line)
 	}
+	timeParse := time.Parse
+	if loc != nil {
+		timeParse = func(layout, value string) (time.Time, error) {
+			return time.ParseInLocation(layout, value, loc)
+		}
+	}
 	var err error
-	if *tim, err = time.Parse("2006-01-02 15:04:05", string(line[:i])); err != nil {
+	if *tim, err = timeParse("2006-01-02 15:04:05", string(line[:i])); err != nil {
 		return line, rt, sid, fmt.Errorf("error parsing %q as time: %v", line[:i], err)
 	}
 	line = line[i+5:]

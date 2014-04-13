@@ -192,6 +192,7 @@ func (db *kvStore) Insert(rec record.Record) error {
 	key[0] = recPrefix
 	var tooLong []byte
 	key = append(key, rec.ID()...)
+
 	_, _, err := db.DB.Put(nil, key,
 		func(k, v []byte) ([]byte, bool, error) {
 			if v != nil { // already exists

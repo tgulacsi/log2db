@@ -26,13 +26,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"unosoft.hu/log2db/record"
 )
 
 // ParseServerLog parses a server.log from the reader,
 // returning the record.Records into the dest channel.
-func ParseServerLog(dest chan<- record.Record, r io.Reader, logDir, appName string) error {
+func ParseServerLog(dest chan<- record.Record, r io.Reader, logDir, appName string, loc *time.Location) error {
 	/*
 	   DIR [2013-11-22 11:01:00]: (344194853) $BRUNO_HOME/data/in/elektr
 	   SHELL [2013-11-22 11:03:11]: (344194853) 399384314; '$BRUNO_HOME/bin/E_elektr_load 929206 $BRUNO_HOME/data/in/elektr/'KGFB_105766847_20131116161839_0000333436.txt''; 'E', 0
@@ -40,7 +41,7 @@ func ParseServerLog(dest chan<- record.Record, r io.Reader, logDir, appName stri
 	   Starting
 	   Ended
 	*/
-	scn := NewBasicParser(r, appName)
+	scn := NewBasicParser(r, appName, loc)
 	for {
 		var rec record.Record
 		err := scn.Scan(&rec)
